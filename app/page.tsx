@@ -349,14 +349,12 @@ export default function MoneyChessGame() {
           visibleMoves.push({ row: newRow, col: newCol })
           return false
         } else {
-          return false
+          return false // Blocked by friendly or cannot capture
         }
       } else {
         // Hidden square - assume no enemy pieces for fog moves
-        if (canCapture) {
-          fogMoves.push({ row: newRow, col: newCol })
-        }
-        return true
+        fogMoves.push({ row: newRow, col: newCol })
+        return true // Always allow movement into fog for calculation
       }
     }
 
@@ -365,11 +363,40 @@ export default function MoneyChessGame() {
         const direction = piece.isWhite ? -1 : 1
         const startRow = piece.isWhite ? 6 : 1
 
-        // Forward moves
-        if (addMove(row + direction, col, false)) {
-          // Double move from start
-          if (row === startRow) {
-            addMove(row + 2 * direction, col, false)
+        // Single forward move
+        const singleForwardRow = row + direction
+        if (singleForwardRow >= 0 && singleForwardRow <= 7) {
+          const isVisibleSingle = visible[singleForwardRow][col]
+          const targetPieceSingle = board[singleForwardRow][col]
+
+          if (isVisibleSingle) {
+            if (targetPieceSingle === null) {
+              visibleMoves.push({ row: singleForwardRow, col })
+            }
+          } else {
+            fogMoves.push({ row: singleForwardRow, col })
+          }
+        }
+
+        // Double forward move from start
+        if (row === startRow) {
+          const doubleForwardRow = row + 2 * direction
+          if (doubleForwardRow >= 0 && doubleForwardRow <= 7) {
+            const isVisibleDouble = visible[doubleForwardRow][col]
+            const isVisibleIntermediate = visible[row + direction][col] // Check visibility of intermediate square
+
+            if (isVisibleDouble) {
+              // Only allow double move if both squares are empty and visible
+              if (board[row + direction][col] === null && board[doubleForwardRow][col] === null) {
+                visibleMoves.push({ row: doubleForwardRow, col })
+              }
+            } else {
+              // In fog, assume path is clear for double move
+              // Add if the intermediate square is also in fog or empty and visible
+              if (!isVisibleIntermediate || board[row + direction][col] === null) {
+                fogMoves.push({ row: doubleForwardRow, col })
+              }
+            }
           }
         }
 
@@ -379,9 +406,9 @@ export default function MoneyChessGame() {
           const newCol = col + dc
           if (newRow >= 0 && newRow <= 7 && newCol >= 0 && newCol <= 7) {
             const targetPiece = board[newRow][newCol]
-            const isVisible = visible[newRow][newCol]
+            const isVisibleTarget = visible[newRow][newCol]
 
-            if (isVisible) {
+            if (isVisibleTarget) {
               if (targetPiece && targetPiece.isWhite !== piece.isWhite) {
                 visibleMoves.push({ row: newRow, col: newCol })
               }
@@ -513,8 +540,21 @@ export default function MoneyChessGame() {
     const { row: fromRow, col: fromCol } = fromPos
     const { row: toRow, col: toCol } = toPos
 
-    // For non-sliding pieces (King, Knight), move directly
-    if (piece.type === PieceType.KING || piece.type === PieceType.KNIGHT) {
+    // For non-sliding pieces (King, Knight, Pawn), move directly to the target square
+    // The "interruption" for pawns happens on diagonal captures, which are handled by the capture logic
+    if (piece.type === PieceType.KING || piece.type === PieceType.KNIGHT || piece.type === PieceType.PAWN) {
+      // For pawns, if it's a diagonal move, we need to check for an enemy at the target.
+      // For forward moves, there's no "interruption" by an enemy piece.
+      if (piece.type === PieceType.PAWN) {
+        const deltaCol = Math.abs(toCol - fromCol)
+        if (deltaCol === 1) {
+          // Diagonal move
+          const targetPiece = board[toRow][toCol]
+          if (targetPiece && targetPiece.isWhite !== piece.isWhite) {
+            return toPos // Capture the piece at the target
+          }
+        }
+      }
       return toPos
     }
 
@@ -616,9 +656,9 @@ export default function MoneyChessGame() {
       }
     } else if (gamePhase === GamePhase.PLAYING) {
       const isVisibleMove = possibleMoves.visibleMoves.some((move) => move.row === row && move.col === col)
-      const isFogMove = possibleMoves.fogMoves.some((move) => move.row === row && move.col === col)
+      const isFogMoveTarget = possibleMoves.fogMoves.some((move) => move.row === row && move.col === col)
 
-      if (isVisibleMove || isFogMove) {
+      if (isVisibleMove || isFogMoveTarget) {
         // Make the move
         if (selectedPosition) {
           const newBoard = board.map((r) => [...r])
@@ -626,7 +666,7 @@ export default function MoneyChessGame() {
 
           let finalPosition = { row, col }
 
-          if (isFogMove && fogOfWarEnabled) {
+          if (isFogMoveTarget && fogOfWarEnabled) {
             // Execute fog move with collision detection
             finalPosition = executeFogMove(selectedPosition, { row, col }, movingPiece)
           }
@@ -1065,12 +1105,7 @@ export default function MoneyChessGame() {
                     const isVisibleMove = possibleMoves.visibleMoves.some(
                       (move) => move.row === row && move.col === col,
                     )
-                    const isFogMove = possibleMoves.fogMoves.some((move) => move.row === row && move.col === col)
-                    const canPlacePiece =
-                      gamePhase === GamePhase.SETUP &&
-                      selectedPiece !== null &&
-                      piece === null &&
-                      ((currentPlayer && row >= 5) || (!currentPlayer && row <= 2))
+                    const isFogMoveTarget = possibleMoves.fogMoves.some((move) => move.row === row && move.col === col)
 
                     const isVisible = gamePhase !== GamePhase.PLAYING || visibleSquares[row][col]
                     const showPiece = piece && (isVisible || piece.isWhite === currentPlayer)
@@ -1090,15 +1125,13 @@ export default function MoneyChessGame() {
                                   ? "bg-yellow-400"
                                   : isVisibleMove
                                     ? "bg-green-400"
-                                    : isFogMove
+                                    : isFogMoveTarget // Apply amber background if it's a fog move target
                                       ? "bg-orange-400"
-                                      : canPlacePiece
-                                        ? "bg-green-200"
-                                        : isLight
-                                          ? "bg-blue-200"
-                                          : "bg-gray-500"
+                                      : isLight
+                                        ? "bg-blue-200"
+                                        : "bg-gray-500"
                           }
-                          ${isSelected || isVisibleMove || isFogMove || isBoardSelected ? "border-2 border-black" : ""}
+                          ${isSelected || isVisibleMove || isFogMoveTarget || isBoardSelected ? "border-2 border-black" : ""}
                           hover:opacity-80
                         `}
                       >
@@ -1114,7 +1147,7 @@ export default function MoneyChessGame() {
                           </div>
                         )}
 
-                        {isFogMove && !piece && (
+                        {isFogMoveTarget && ( // Always show orange dot if it's a fog move target
                           <div className="absolute inset-0 flex items-center justify-center">
                             <div className="w-3 h-3 bg-orange-600 rounded-full opacity-70"></div>
                           </div>
