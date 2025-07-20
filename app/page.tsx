@@ -1,11 +1,14 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
-import { Trash2 } from "lucide-react"
+import { Switch } from "@/components/ui/switch"
+import { Label } from "@/components/ui/label"
+import { Slider } from "@/components/ui/slider"
+import { Trash2, Clock, Eye, EyeOff } from "lucide-react"
 
 enum PieceType {
   PAWN = "PAWN",
@@ -34,6 +37,7 @@ interface SavedSetup {
 }
 
 enum GamePhase {
+  GAME_SETUP = "GAME_SETUP",
   SETUP = "SETUP",
   PLAYING = "PLAYING",
 }
@@ -60,7 +64,7 @@ const PIECE_COSTS = {
 const PURCHASABLE_PIECES = [PieceType.PAWN, PieceType.KNIGHT, PieceType.BISHOP, PieceType.ROOK, PieceType.QUEEN]
 
 export default function MoneyChessGame() {
-  const [gamePhase, setGamePhase] = useState<GamePhase>(GamePhase.SETUP)
+  const [gamePhase, setGamePhase] = useState<GamePhase>(GamePhase.GAME_SETUP)
   const [currentPlayer, setCurrentPlayer] = useState(true) // true = white, false = black
   const [whiteBudget, setWhiteBudget] = useState(39)
   const [blackBudget, setBlackBudget] = useState(39)
@@ -74,9 +78,17 @@ export default function MoneyChessGame() {
   const [whiteSetupComplete, setWhiteSetupComplete] = useState(false)
   const [blackSetupComplete, setBlackSetupComplete] = useState(false)
 
+  // Game setup options
+  const [fogOfWarEnabled, setFogOfWarEnabled] = useState(false)
+  const [moveTimeLimit, setMoveTimeLimit] = useState(300) // 5 minutes in seconds
+  const [timeRemaining, setTimeRemaining] = useState(300)
+
   // Gameplay state
   const [selectedPosition, setSelectedPosition] = useState<BoardPosition | null>(null)
-  const [possibleMoves, setPossibleMoves] = useState<BoardPosition[]>([])
+  const [possibleMoves, setPossibleMoves] = useState<{ visibleMoves: BoardPosition[]; fogMoves: BoardPosition[] }>({
+    visibleMoves: [],
+    fogMoves: [],
+  })
   const [gameStatus, setGameStatus] = useState("")
   const [moveHistory, setMoveHistory] = useState<string[]>([])
 
@@ -97,10 +109,72 @@ export default function MoneyChessGame() {
     }
   }, [])
 
+  // Timer logic
+  useEffect(() => {
+    if (gamePhase === GamePhase.PLAYING && timeRemaining > 0) {
+      const timer = setInterval(() => {
+        setTimeRemaining((prev) => {
+          if (prev <= 1) {
+            // Time's up - switch turns
+            setCurrentPlayer(!currentPlayer)
+            return moveTimeLimit
+          }
+          return prev - 1
+        })
+      }, 1000)
+
+      return () => clearInterval(timer)
+    }
+  }, [gamePhase, timeRemaining, currentPlayer, moveTimeLimit])
+
+  // Reset timer when turn switches
+  useEffect(() => {
+    if (gamePhase === GamePhase.PLAYING) {
+      setTimeRemaining(moveTimeLimit)
+    }
+  }, [currentPlayer, moveTimeLimit, gamePhase])
+
   // Helper function to get default king position
   const getDefaultKingPosition = (isWhite: boolean): BoardPosition => {
     return { row: isWhite ? 7 : 0, col: 4 }
   }
+
+  // Calculate visible squares for fog of war
+  const calculateVisibleSquares = useCallback(
+    (board: (ChessPiece | null)[][], player: boolean): boolean[][] => {
+      const visible = Array(8)
+        .fill(null)
+        .map(() => Array(8).fill(false))
+
+      if (!fogOfWarEnabled) {
+        return Array(8)
+          .fill(null)
+          .map(() => Array(8).fill(true))
+      }
+
+      // Find all player's pieces and mark adjacent squares as visible
+      for (let row = 0; row < 8; row++) {
+        for (let col = 0; col < 8; col++) {
+          const piece = board[row][col]
+          if (piece && piece.isWhite === player) {
+            // Mark the piece's square and all adjacent squares as visible
+            for (let dr = -1; dr <= 1; dr++) {
+              for (let dc = -1; dc <= 1; dc++) {
+                const newRow = row + dr
+                const newCol = col + dc
+                if (newRow >= 0 && newRow < 8 && newCol >= 0 && newCol < 8) {
+                  visible[newRow][newCol] = true
+                }
+              }
+            }
+          }
+        }
+      }
+
+      return visible
+    },
+    [fogOfWarEnabled],
+  )
 
   // Place default kings when players switch
   useEffect(() => {
@@ -115,6 +189,11 @@ export default function MoneyChessGame() {
       setBoard(newBoard)
     }
   }, [currentPlayer, gamePhase])
+
+  // Start game setup
+  const startGameSetup = () => {
+    setGamePhase(GamePhase.SETUP)
+  }
 
   // Apply classic chess setup
   const applyClassicSetup = () => {
@@ -249,22 +328,48 @@ export default function MoneyChessGame() {
     board: (ChessPiece | null)[][],
     position: BoardPosition,
     piece: ChessPiece,
-  ): BoardPosition[] => {
-    const moves: BoardPosition[] = []
+  ): { visibleMoves: BoardPosition[]; fogMoves: BoardPosition[] } => {
+    const visibleMoves: BoardPosition[] = []
+    const fogMoves: BoardPosition[] = []
     const { row, col } = position
+    const visible = calculateVisibleSquares(board, piece.isWhite)
+
+    const addMove = (newRow: number, newCol: number, canCapture = true) => {
+      if (newRow < 0 || newRow > 7 || newCol < 0 || newCol > 7) return false
+
+      const targetPiece = board[newRow][newCol]
+      const isVisible = visible[newRow][newCol]
+
+      if (isVisible) {
+        // Visible square - normal logic
+        if (targetPiece === null) {
+          visibleMoves.push({ row: newRow, col: newCol })
+          return true
+        } else if (canCapture && targetPiece.isWhite !== piece.isWhite) {
+          visibleMoves.push({ row: newRow, col: newCol })
+          return false
+        } else {
+          return false
+        }
+      } else {
+        // Hidden square - assume no enemy pieces for fog moves
+        if (canCapture) {
+          fogMoves.push({ row: newRow, col: newCol })
+        }
+        return true
+      }
+    }
 
     switch (piece.type) {
       case PieceType.PAWN: {
         const direction = piece.isWhite ? -1 : 1
         const startRow = piece.isWhite ? 6 : 1
 
-        // Forward move
-        if (row + direction >= 0 && row + direction <= 7 && board[row + direction][col] === null) {
-          moves.push({ row: row + direction, col })
-
+        // Forward moves
+        if (addMove(row + direction, col, false)) {
           // Double move from start
-          if (row === startRow && board[row + 2 * direction][col] === null) {
-            moves.push({ row: row + 2 * direction, col })
+          if (row === startRow) {
+            addMove(row + 2 * direction, col, false)
           }
         }
 
@@ -274,8 +379,15 @@ export default function MoneyChessGame() {
           const newCol = col + dc
           if (newRow >= 0 && newRow <= 7 && newCol >= 0 && newCol <= 7) {
             const targetPiece = board[newRow][newCol]
-            if (targetPiece && targetPiece.isWhite !== piece.isWhite) {
-              moves.push({ row: newRow, col: newCol })
+            const isVisible = visible[newRow][newCol]
+
+            if (isVisible) {
+              if (targetPiece && targetPiece.isWhite !== piece.isWhite) {
+                visibleMoves.push({ row: newRow, col: newCol })
+              }
+            } else {
+              // In fog, assume we can capture diagonally
+              fogMoves.push({ row: newRow, col: newCol })
             }
           }
         }
@@ -291,19 +403,7 @@ export default function MoneyChessGame() {
         ]
         for (const [dr, dc] of directions) {
           for (let i = 1; i <= 7; i++) {
-            const newRow = row + dr * i
-            const newCol = col + dc * i
-            if (newRow < 0 || newRow > 7 || newCol < 0 || newCol > 7) break
-
-            const targetPiece = board[newRow][newCol]
-            if (targetPiece === null) {
-              moves.push({ row: newRow, col: newCol })
-            } else {
-              if (targetPiece.isWhite !== piece.isWhite) {
-                moves.push({ row: newRow, col: newCol })
-              }
-              break
-            }
+            if (!addMove(row + dr * i, col + dc * i)) break
           }
         }
         break
@@ -318,19 +418,7 @@ export default function MoneyChessGame() {
         ]
         for (const [dr, dc] of directions) {
           for (let i = 1; i <= 7; i++) {
-            const newRow = row + dr * i
-            const newCol = col + dc * i
-            if (newRow < 0 || newRow > 7 || newCol < 0 || newCol > 7) break
-
-            const targetPiece = board[newRow][newCol]
-            if (targetPiece === null) {
-              moves.push({ row: newRow, col: newCol })
-            } else {
-              if (targetPiece.isWhite !== piece.isWhite) {
-                moves.push({ row: newRow, col: newCol })
-              }
-              break
-            }
+            if (!addMove(row + dr * i, col + dc * i)) break
           }
         }
         break
@@ -348,14 +436,7 @@ export default function MoneyChessGame() {
           [2, 1],
         ]
         for (const [dr, dc] of knightMoves) {
-          const newRow = row + dr
-          const newCol = col + dc
-          if (newRow >= 0 && newRow <= 7 && newCol >= 0 && newCol <= 7) {
-            const targetPiece = board[newRow][newCol]
-            if (targetPiece === null || targetPiece.isWhite !== piece.isWhite) {
-              moves.push({ row: newRow, col: newCol })
-            }
-          }
+          addMove(row + dr, col + dc)
         }
         break
       }
@@ -373,19 +454,7 @@ export default function MoneyChessGame() {
         ]
         for (const [dr, dc] of directions) {
           for (let i = 1; i <= 7; i++) {
-            const newRow = row + dr * i
-            const newCol = col + dc * i
-            if (newRow < 0 || newRow > 7 || newCol < 0 || newCol > 7) break
-
-            const targetPiece = board[newRow][newCol]
-            if (targetPiece === null) {
-              moves.push({ row: newRow, col: newCol })
-            } else {
-              if (targetPiece.isWhite !== piece.isWhite) {
-                moves.push({ row: newRow, col: newCol })
-              }
-              break
-            }
+            if (!addMove(row + dr * i, col + dc * i)) break
           }
         }
         break
@@ -403,20 +472,13 @@ export default function MoneyChessGame() {
           [1, 1],
         ]
         for (const [dr, dc] of kingMoves) {
-          const newRow = row + dr
-          const newCol = col + dc
-          if (newRow >= 0 && newRow <= 7 && newCol >= 0 && newCol <= 7) {
-            const targetPiece = board[newRow][newCol]
-            if (targetPiece === null || targetPiece.isWhite !== piece.isWhite) {
-              moves.push({ row: newRow, col: newCol })
-            }
-          }
+          addMove(row + dr, col + dc)
         }
         break
       }
     }
 
-    return moves
+    return { visibleMoves, fogMoves }
   }
 
   const checkGameStatus = (board: (ChessPiece | null)[][], currentPlayer: boolean) => {
@@ -445,6 +507,44 @@ export default function MoneyChessGame() {
     } else {
       setGameStatus("")
     }
+  }
+
+  const executeFogMove = (fromPos: BoardPosition, toPos: BoardPosition, piece: ChessPiece): BoardPosition => {
+    const { row: fromRow, col: fromCol } = fromPos
+    const { row: toRow, col: toCol } = toPos
+
+    // For non-sliding pieces (King, Knight), move directly
+    if (piece.type === PieceType.KING || piece.type === PieceType.KNIGHT) {
+      return toPos
+    }
+
+    // For sliding pieces, trace the path
+    const deltaRow = toRow - fromRow
+    const deltaCol = toCol - fromCol
+
+    // Normalize direction
+    const dirRow = deltaRow === 0 ? 0 : deltaRow / Math.abs(deltaRow)
+    const dirCol = deltaCol === 0 ? 0 : deltaCol / Math.abs(deltaCol)
+
+    // Trace path and find first collision
+    let currentRow = fromRow + dirRow
+    let currentCol = fromCol + dirCol
+
+    while (currentRow !== toRow + dirRow || currentCol !== toCol + dirCol) {
+      if (currentRow < 0 || currentRow > 7 || currentCol < 0 || currentCol > 7) break
+
+      const pieceAtSquare = board[currentRow][currentCol]
+      if (pieceAtSquare && pieceAtSquare.isWhite !== piece.isWhite) {
+        // Found enemy piece - stop here
+        return { row: currentRow, col: currentCol }
+      }
+
+      currentRow += dirRow
+      currentCol += dirCol
+    }
+
+    // No collision found, move to intended square
+    return toPos
   }
 
   const handleSquareClick = (row: number, col: number) => {
@@ -515,25 +615,34 @@ export default function MoneyChessGame() {
         setSelectedPiece(null)
       }
     } else if (gamePhase === GamePhase.PLAYING) {
-      const isPossibleMove = possibleMoves.some((move) => move.row === row && move.col === col)
+      const isVisibleMove = possibleMoves.visibleMoves.some((move) => move.row === row && move.col === col)
+      const isFogMove = possibleMoves.fogMoves.some((move) => move.row === row && move.col === col)
 
-      if (isPossibleMove) {
+      if (isVisibleMove || isFogMove) {
         // Make the move
         if (selectedPosition) {
           const newBoard = board.map((r) => [...r])
-          const movingPiece = newBoard[selectedPosition.row][selectedPosition.col]
+          const movingPiece = newBoard[selectedPosition.row][selectedPosition.col]!
+
+          let finalPosition = { row, col }
+
+          if (isFogMove && fogOfWarEnabled) {
+            // Execute fog move with collision detection
+            finalPosition = executeFogMove(selectedPosition, { row, col }, movingPiece)
+          }
+
           newBoard[selectedPosition.row][selectedPosition.col] = null
-          newBoard[row][col] = movingPiece
+          newBoard[finalPosition.row][finalPosition.col] = movingPiece
           setBoard(newBoard)
 
           // Add to move history
-          const moveNotation = `${String.fromCharCode(97 + selectedPosition.col)}${8 - selectedPosition.row}-${String.fromCharCode(97 + col)}${8 - row}`
+          const moveNotation = `${String.fromCharCode(97 + selectedPosition.col)}${8 - selectedPosition.row}-${String.fromCharCode(97 + finalPosition.col)}${8 - finalPosition.row}`
           setMoveHistory([...moveHistory, moveNotation])
 
           // Switch turns
           setCurrentPlayer(!currentPlayer)
           setSelectedPosition(null)
-          setPossibleMoves([])
+          setPossibleMoves({ visibleMoves: [], fogMoves: [] })
 
           // Check for game end conditions
           checkGameStatus(newBoard, !currentPlayer)
@@ -541,11 +650,12 @@ export default function MoneyChessGame() {
       } else if (piece && piece.isWhite === currentPlayer) {
         // Select piece
         setSelectedPosition(position)
-        setPossibleMoves(calculatePossibleMoves(board, position, piece))
+        const moves = calculatePossibleMoves(board, position, piece)
+        setPossibleMoves(moves)
       } else {
         // Deselect
         setSelectedPosition(null)
-        setPossibleMoves([])
+        setPossibleMoves({ visibleMoves: [], fogMoves: [] })
       }
     }
   }
@@ -587,6 +697,7 @@ export default function MoneyChessGame() {
       if (blackSetupComplete) {
         setGamePhase(GamePhase.PLAYING)
         setCurrentPlayer(true) // White starts
+        setTimeRemaining(moveTimeLimit)
       } else {
         setCurrentPlayer(false)
       }
@@ -595,6 +706,7 @@ export default function MoneyChessGame() {
       if (whiteSetupComplete) {
         setGamePhase(GamePhase.PLAYING)
         setCurrentPlayer(true) // White starts
+        setTimeRemaining(moveTimeLimit)
       } else {
         setCurrentPlayer(true)
       }
@@ -602,7 +714,7 @@ export default function MoneyChessGame() {
   }
 
   const resetGame = () => {
-    setGamePhase(GamePhase.SETUP)
+    setGamePhase(GamePhase.GAME_SETUP)
     setCurrentPlayer(true)
     setWhiteBudget(39)
     setBlackBudget(39)
@@ -614,11 +726,12 @@ export default function MoneyChessGame() {
     setWhiteSetupComplete(false)
     setBlackSetupComplete(false)
     setSelectedPosition(null)
-    setPossibleMoves([])
+    setPossibleMoves({ visibleMoves: [], fogMoves: [] })
     setGameStatus("")
     setMoveHistory([])
     setSelectedPiece(null)
     setSelectedBoardPosition(null)
+    setTimeRemaining(moveTimeLimit)
   }
 
   const resetCurrentPlayer = () => {
@@ -649,6 +762,81 @@ export default function MoneyChessGame() {
     setSelectedPiece(null)
   }
 
+  // Format time for display
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return `${mins}:${secs.toString().padStart(2, "0")}`
+  }
+
+  // Get visible squares for current player
+  const visibleSquares = calculateVisibleSquares(board, currentPlayer)
+
+  // Game Setup Screen
+  if (gamePhase === GamePhase.GAME_SETUP) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-amber-50 to-orange-100 p-4">
+        <div className="max-w-2xl mx-auto">
+          <h1 className="text-4xl font-bold text-center mb-8 text-amber-900">Money Chess</h1>
+
+          <Card className="mb-6">
+            <CardContent className="p-8">
+              <h2 className="text-2xl font-bold mb-6 text-center">Game Setup</h2>
+
+              <div className="space-y-8">
+                {/* Fog of War Setting */}
+                <div className="flex items-center justify-between p-4 border rounded-lg">
+                  <div className="flex items-center gap-3">
+                    {fogOfWarEnabled ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                    <div>
+                      <Label htmlFor="fog-of-war" className="text-lg font-medium">
+                        Fog of War
+                      </Label>
+                      <p className="text-sm text-gray-600">Only see squares adjacent to your pieces</p>
+                    </div>
+                  </div>
+                  <Switch id="fog-of-war" checked={fogOfWarEnabled} onCheckedChange={setFogOfWarEnabled} />
+                </div>
+
+                {/* Move Timer Setting */}
+                <div className="p-4 border rounded-lg">
+                  <div className="flex items-center gap-3 mb-4">
+                    <Clock className="h-5 w-5" />
+                    <div>
+                      <Label className="text-lg font-medium">Move Time Limit</Label>
+                      <p className="text-sm text-gray-600">Maximum time per move: {formatTime(moveTimeLimit)}</p>
+                    </div>
+                  </div>
+                  <div className="space-y-4">
+                    <Slider
+                      value={[moveTimeLimit]}
+                      onValueChange={(value) => setMoveTimeLimit(value[0])}
+                      max={300}
+                      min={30}
+                      step={30}
+                      className="w-full"
+                    />
+                    <div className="flex justify-between text-xs text-gray-500">
+                      <span>30s</span>
+                      <span>2:30</span>
+                      <span>5:00</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-8 text-center">
+                <Button onClick={startGameSetup} size="lg" className="px-8">
+                  Start Game
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50 to-orange-100 p-4">
       <div className="max-w-6xl mx-auto">
@@ -670,6 +858,23 @@ export default function MoneyChessGame() {
                   Budget: {currentPlayer ? whiteBudget : blackBudget} points
                 </p>
               </>
+            )}
+
+            {gamePhase === GamePhase.PLAYING && (
+              <div className="flex items-center justify-center gap-4">
+                <div className={`flex items-center gap-2 ${currentPlayer ? "text-black" : "text-white"}`}>
+                  <Clock className="h-5 w-5" />
+                  <span className={`text-lg font-mono ${timeRemaining <= 30 ? "text-red-500 font-bold" : ""}`}>
+                    {formatTime(timeRemaining)}
+                  </span>
+                </div>
+                {fogOfWarEnabled && (
+                  <div className={`flex items-center gap-2 ${currentPlayer ? "text-black" : "text-white"}`}>
+                    <EyeOff className="h-4 w-4" />
+                    <span className="text-sm">Fog of War</span>
+                  </div>
+                )}
+              </div>
             )}
 
             {gameStatus && <p className="text-xl font-bold text-red-600 mt-2">{gameStatus}</p>}
@@ -857,12 +1062,18 @@ export default function MoneyChessGame() {
 
                     const isSelected = selectedPosition?.row === row && selectedPosition?.col === col
                     const isBoardSelected = selectedBoardPosition?.row === row && selectedBoardPosition?.col === col
-                    const isPossibleMove = possibleMoves.some((move) => move.row === row && move.col === col)
+                    const isVisibleMove = possibleMoves.visibleMoves.some(
+                      (move) => move.row === row && move.col === col,
+                    )
+                    const isFogMove = possibleMoves.fogMoves.some((move) => move.row === row && move.col === col)
                     const canPlacePiece =
                       gamePhase === GamePhase.SETUP &&
                       selectedPiece !== null &&
                       piece === null &&
                       ((currentPlayer && row >= 5) || (!currentPlayer && row <= 2))
+
+                    const isVisible = gamePhase !== GamePhase.PLAYING || visibleSquares[row][col]
+                    const showPiece = piece && (isVisible || piece.isWhite === currentPlayer)
 
                     return (
                       <button
@@ -871,31 +1082,41 @@ export default function MoneyChessGame() {
                         className={`
                           aspect-square relative border border-gray-400 text-2xl font-bold transition-all
                           ${
-                            isSelected
-                              ? "bg-blue-500"
-                              : isBoardSelected
-                                ? "bg-yellow-400"
-                                : isPossibleMove
-                                  ? "bg-green-400"
-                                  : canPlacePiece
-                                    ? "bg-green-200"
-                                    : isLight
-                                      ? "bg-blue-200"
-                                      : "bg-gray-500"
+                            !isVisible && gamePhase === GamePhase.PLAYING
+                              ? "bg-gray-400"
+                              : isSelected
+                                ? "bg-blue-500"
+                                : isBoardSelected
+                                  ? "bg-yellow-400"
+                                  : isVisibleMove
+                                    ? "bg-green-400"
+                                    : isFogMove
+                                      ? "bg-orange-400"
+                                      : canPlacePiece
+                                        ? "bg-green-200"
+                                        : isLight
+                                          ? "bg-blue-200"
+                                          : "bg-gray-500"
                           }
-                          ${isSelected || isPossibleMove || isBoardSelected ? "border-2 border-black" : ""}
+                          ${isSelected || isVisibleMove || isFogMove || isBoardSelected ? "border-2 border-black" : ""}
                           hover:opacity-80
                         `}
                       >
-                        {piece && (
+                        {showPiece && (
                           <span className={piece.isWhite ? "text-white drop-shadow-lg" : "text-black"}>
                             {PIECE_SYMBOLS[piece.type]}
                           </span>
                         )}
 
-                        {isPossibleMove && !piece && (
+                        {isVisibleMove && !piece && (
                           <div className="absolute inset-0 flex items-center justify-center">
                             <div className="w-3 h-3 bg-green-600 rounded-full opacity-70"></div>
+                          </div>
+                        )}
+
+                        {isFogMove && !piece && (
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            <div className="w-3 h-3 bg-orange-600 rounded-full opacity-70"></div>
                           </div>
                         )}
                       </button>
@@ -911,7 +1132,7 @@ export default function MoneyChessGame() {
                 <Button
                   onClick={() => {
                     setSelectedPosition(null)
-                    setPossibleMoves([])
+                    setPossibleMoves({ visibleMoves: [], fogMoves: [] })
                   }}
                   size="lg"
                 >
