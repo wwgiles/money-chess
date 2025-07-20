@@ -17,7 +17,8 @@ export default function AuthPage() {
   const [isSignUp, setIsSignUp] = useState(false)
   const [loading, setLoading] = useState(false)
   const router = useRouter()
-  const supabase = createClient()
+  // Initialize Supabase client lazily to ensure it's only created on the client side
+  const [supabase] = useState(() => createClient())
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault()
