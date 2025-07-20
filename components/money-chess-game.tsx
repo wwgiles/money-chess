@@ -1,14 +1,20 @@
 "use client"
 
+import { CardTitle } from "@/components/ui/card"
+
+import { CardHeader } from "@/components/ui/card"
+
 import { useState, useEffect, useCallback } from "react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
-import { Trash2, Clock, EyeOff } from "lucide-react"
-import Link from "next/link"
+import { Trash2, Clock, EyeOff, Loader2 } from "lucide-react"
+import { createClient } from "@/lib/supabase/client"
+import { updateGameSession } from "@/app/actions"
+import { toast } from "@/hooks/use-toast"
 
-enum PieceType {
+export enum PieceType {
   PAWN = "PAWN",
   KNIGHT = "KNIGHT",
   BISHOP = "BISHOP",
@@ -17,12 +23,12 @@ enum PieceType {
   KING = "KING",
 }
 
-interface ChessPiece {
+export interface ChessPiece {
   type: PieceType
   isWhite: boolean
 }
 
-interface BoardPosition {
+export interface BoardPosition {
   row: number
   col: number
 }
@@ -34,10 +40,12 @@ interface SavedSetup {
   isWhite: boolean
 }
 
-enum GamePhase {
-  GAME_SETUP = "GAME_SETUP",
-  SETUP = "SETUP",
+export enum GamePhase {
+  WAITING_FOR_OPPONENT = "WAITING_FOR_OPPONENT",
+  GAME_SETUP = "GAME_SETUP", // Initial setup screen for game options
+  SETUP = "SETUP", // Player-specific piece setup
   PLAYING = "PLAYING",
+  GAME_OVER = "GAME_OVER",
 }
 
 const PIECE_SYMBOLS = {
@@ -61,25 +69,62 @@ const PIECE_COSTS = {
 // Available pieces for purchase (excluding King)
 const PURCHASABLE_PIECES = [PieceType.PAWN, PieceType.KNIGHT, PieceType.BISHOP, PieceType.ROOK, PieceType.QUEEN]
 
-export default function MoneyChessGame() {
-  const [gamePhase, setGamePhase] = useState<GamePhase>(GamePhase.GAME_SETUP)
-  const [currentPlayer, setCurrentPlayer] = useState(true) // true = white, false = black
-  const [whiteBudget, setWhiteBudget] = useState(39)
-  const [blackBudget, setBlackBudget] = useState(39)
-  const [board, setBoard] = useState<(ChessPiece | null)[][]>(
-    Array(8)
-      .fill(null)
-      .map(() => Array(8).fill(null)),
+interface MoneyChessGameProps {
+  gameId: string
+  initialBoard: (ChessPiece | null)[][]
+  initialPlayer1Id: string
+  initialPlayer2Id: string | null
+  initialStatus: string
+  initialCurrentTurn: "white" | "black"
+  initialMoveHistory: string[]
+  initialFogOfWarEnabled: boolean
+  initialMoveTimeLimit: number
+  initialWhiteBudget: number
+  initialBlackBudget: number
+  initialWhiteSetupComplete: boolean
+  initialBlackSetupComplete: boolean
+  initialTimeRemainingWhite: number
+  initialTimeRemainingBlack: number
+}
+
+export default function MoneyChessGame({
+  gameId,
+  initialBoard,
+  initialPlayer1Id,
+  initialPlayer2Id,
+  initialStatus,
+  initialCurrentTurn,
+  initialMoveHistory,
+  initialFogOfWarEnabled,
+  initialMoveTimeLimit,
+  initialWhiteBudget,
+  initialBlackBudget,
+  initialWhiteSetupComplete,
+  initialBlackSetupComplete,
+  initialTimeRemainingWhite,
+  initialTimeRemainingBlack,
+}: MoneyChessGameProps) {
+  const supabase = createClient()
+  const [user, setUser] = useState<any>(null)
+  const [playerColor, setPlayerColor] = useState<"white" | "black" | null>(null)
+
+  const [gamePhase, setGamePhase] = useState<GamePhase>(
+    initialStatus === "waiting" ? GamePhase.WAITING_FOR_OPPONENT : GamePhase.SETUP,
   )
+  const [currentPlayerTurn, setCurrentPlayerTurn] = useState<"white" | "black">(initialCurrentTurn)
+  const [whiteBudget, setWhiteBudget] = useState(initialWhiteBudget)
+  const [blackBudget, setBlackBudget] = useState(initialBlackBudget)
+  const [board, setBoard] = useState<(ChessPiece | null)[][]>(initialBoard)
   const [selectedPiece, setSelectedPiece] = useState<PieceType | null>(null)
   const [selectedBoardPosition, setSelectedBoardPosition] = useState<BoardPosition | null>(null)
-  const [whiteSetupComplete, setWhiteSetupComplete] = useState(false)
-  const [blackSetupComplete, setBlackSetupComplete] = useState(false)
+  const [whiteSetupComplete, setWhiteSetupComplete] = useState(initialWhiteSetupComplete)
+  const [blackSetupComplete, setBlackSetupComplete] = useState(initialBlackSetupComplete)
 
-  // Game setup options
-  const [fogOfWarEnabled, setFogOfWarEnabled] = useState(false)
-  const [moveTimeLimit, setMoveTimeLimit] = useState(300) // 5 minutes in seconds
-  const [timeRemaining, setTimeRemaining] = useState(300)
+  // Game setup options (synced from DB)
+  const [fogOfWarEnabled, setFogOfWarEnabled] = useState(initialFogOfWarEnabled)
+  const [moveTimeLimit, setMoveTimeLimit] = useState(initialMoveTimeLimit)
+  const [timeRemainingWhite, setTimeRemainingWhite] = useState(initialTimeRemainingWhite)
+  const [timeRemainingBlack, setTimeRemainingBlack] = useState(initialTimeRemainingBlack)
 
   // Gameplay state
   const [selectedPosition, setSelectedPosition] = useState<BoardPosition | null>(null)
@@ -88,7 +133,7 @@ export default function MoneyChessGame() {
     fogMoves: [],
   })
   const [gameStatus, setGameStatus] = useState("")
-  const [moveHistory, setMoveHistory] = useState<string[]>([])
+  const [moveHistory, setMoveHistory] = useState<string[]>(initialMoveHistory)
 
   // Preset and save functionality
   const [savedSetups, setSavedSetups] = useState<SavedSetup[]>([])
@@ -107,30 +152,95 @@ export default function MoneyChessGame() {
     }
   }, [])
 
+  // Fetch user and determine player color
+  useEffect(() => {
+    const fetchUser = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      setUser(user)
+      if (user?.id === initialPlayer1Id) {
+        setPlayerColor("white")
+      } else if (user?.id === initialPlayer2Id) {
+        setPlayerColor("black")
+      } else {
+        // Spectator mode or error
+        toast({
+          title: "Not a player in this game",
+          description: "You are viewing this game as a spectator.",
+          variant: "destructive",
+        })
+      }
+    }
+    fetchUser()
+  }, [supabase, initialPlayer1Id, initialPlayer2Id])
+
+  // Real-time game state synchronization
+  useEffect(() => {
+    const channel = supabase
+      .channel(`game_session:${gameId}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "game_sessions", filter: `id=eq.${gameId}` },
+        (payload) => {
+          const updatedSession = payload.new as MoneyChessGameProps
+          setBoard(updatedSession.initialBoard)
+          setCurrentPlayerTurn(updatedSession.initialCurrentTurn)
+          setMoveHistory(updatedSession.initialMoveHistory)
+          setWhiteBudget(updatedSession.initialWhiteBudget)
+          setBlackBudget(updatedSession.initialBlackBudget)
+          setWhiteSetupComplete(updatedSession.initialWhiteSetupComplete)
+          setBlackSetupComplete(updatedSession.initialBlackSetupComplete)
+          setTimeRemainingWhite(updatedSession.initialTimeRemainingWhite)
+          setTimeRemainingBlack(updatedSession.initialTimeRemainingBlack)
+          setFogOfWarEnabled(updatedSession.initialFogOfWarEnabled)
+          setMoveTimeLimit(updatedSession.initialMoveTimeLimit)
+
+          if (updatedSession.initialStatus === "in_progress" && gamePhase === GamePhase.WAITING_FOR_OPPONENT) {
+            setGamePhase(GamePhase.SETUP) // Transition to setup once opponent joins
+            toast({
+              title: "Opponent Joined!",
+              description: "Game is ready for setup.",
+            })
+          } else if (updatedSession.initialStatus === "finished") {
+            setGamePhase(GamePhase.GAME_OVER)
+            setGameStatus("Game Over!") // More specific status will be set by checkGameStatus
+          }
+        },
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [supabase, gameId, gamePhase])
+
   // Timer logic
   useEffect(() => {
-    if (gamePhase === GamePhase.PLAYING && timeRemaining > 0) {
+    if (gamePhase === GamePhase.PLAYING && playerColor === currentPlayerTurn) {
       const timer = setInterval(() => {
-        setTimeRemaining((prev) => {
-          if (prev <= 1) {
-            // Time's up - switch turns
-            setCurrentPlayer(!currentPlayer)
-            return moveTimeLimit
-          }
-          return prev - 1
-        })
+        if (currentPlayerTurn === "white") {
+          setTimeRemainingWhite((prev) => {
+            if (prev <= 1) {
+              handleTurnEnd(true) // White's time ran out
+              return moveTimeLimit
+            }
+            return prev - 1
+          })
+        } else {
+          setTimeRemainingBlack((prev) => {
+            if (prev <= 1) {
+              handleTurnEnd(false) // Black's time ran out
+              return moveTimeLimit
+            }
+            return prev - 1
+          })
+        }
       }, 1000)
 
       return () => clearInterval(timer)
     }
-  }, [gamePhase, timeRemaining, currentPlayer, moveTimeLimit])
-
-  // Reset timer when turn switches
-  useEffect(() => {
-    if (gamePhase === GamePhase.PLAYING) {
-      setTimeRemaining(moveTimeLimit)
-    }
-  }, [currentPlayer, moveTimeLimit, gamePhase])
+  }, [gamePhase, currentPlayerTurn, playerColor, moveTimeLimit, timeRemainingWhite, timeRemainingBlack])
 
   // Helper function to get default king position
   const getDefaultKingPosition = (isWhite: boolean): BoardPosition => {
@@ -139,7 +249,7 @@ export default function MoneyChessGame() {
 
   // Calculate visible squares for fog of war
   const calculateVisibleSquares = useCallback(
-    (board: (ChessPiece | null)[][], player: boolean): boolean[][] => {
+    (board: (ChessPiece | null)[][], playerIsWhite: boolean): boolean[][] => {
       const visible = Array(8)
         .fill(null)
         .map(() => Array(8).fill(false))
@@ -154,7 +264,7 @@ export default function MoneyChessGame() {
       for (let row = 0; row < 8; row++) {
         for (let col = 0; col < 8; col++) {
           const piece = board[row][col]
-          if (piece && piece.isWhite === player) {
+          if (piece && piece.isWhite === playerIsWhite) {
             // Mark the piece's square and all adjacent squares as visible
             for (let dr = -1; dr <= 1; dr++) {
               for (let dc = -1; dc <= 1; dc++) {
@@ -174,41 +284,41 @@ export default function MoneyChessGame() {
     [fogOfWarEnabled],
   )
 
-  // Place default kings when players switch
+  // Place default kings when players switch during setup
   useEffect(() => {
-    const hasKing = board.some((row) =>
-      row.some((piece) => piece?.type === PieceType.KING && piece.isWhite === currentPlayer),
-    )
+    if (gamePhase === GamePhase.SETUP && playerColor === currentPlayerTurn) {
+      const hasKing = board.some((row) =>
+        row.some((piece) => piece?.type === PieceType.KING && piece.isWhite === (playerColor === "white")),
+      )
 
-    if (!hasKing && gamePhase === GamePhase.SETUP) {
-      const newBoard = board.map((r) => [...r])
-      const defaultPos = getDefaultKingPosition(currentPlayer)
-      newBoard[defaultPos.row][defaultPos.col] = { type: PieceType.KING, isWhite: currentPlayer }
-      setBoard(newBoard)
+      if (!hasKing) {
+        const newBoard = board.map((r) => [...r])
+        const defaultPos = getDefaultKingPosition(playerColor === "white")
+        newBoard[defaultPos.row][defaultPos.col] = { type: PieceType.KING, isWhite: playerColor === "white" }
+        setBoard(newBoard)
+        updateGameSession(gameId, { board_state: newBoard })
+      }
     }
-  }, [currentPlayer, gamePhase])
-
-  // Start game setup
-  const startGameSetup = () => {
-    setGamePhase(GamePhase.SETUP)
-  }
+  }, [currentPlayerTurn, gamePhase, playerColor, board, gameId])
 
   // Apply classic chess setup
-  const applyClassicSetup = () => {
+  const applyClassicSetup = async () => {
+    if (playerColor !== currentPlayerTurn) return // Only current player can apply setup
+
     const newBoard = board.map((r) => [...r])
 
     // Clear current player's pieces first
     for (let row = 0; row < 8; row++) {
       for (let col = 0; col < 8; col++) {
-        if (newBoard[row][col]?.isWhite === currentPlayer) {
+        if (newBoard[row][col]?.isWhite === (playerColor === "white")) {
           newBoard[row][col] = null
         }
       }
     }
 
     // Define classic setup for current player
-    const backRow = currentPlayer ? 7 : 0
-    const frontRow = currentPlayer ? 6 : 1
+    const backRow = playerColor === "white" ? 7 : 0
+    const frontRow = playerColor === "white" ? 6 : 1
 
     // Place back row pieces
     const backRowPieces = [
@@ -223,12 +333,12 @@ export default function MoneyChessGame() {
     ]
 
     backRowPieces.forEach((pieceType, col) => {
-      newBoard[backRow][col] = { type: pieceType, isWhite: currentPlayer }
+      newBoard[backRow][col] = { type: pieceType, isWhite: playerColor === "white" }
     })
 
     // Place pawns
     for (let col = 0; col < 8; col++) {
-      newBoard[frontRow][col] = { type: PieceType.PAWN, isWhite: currentPlayer }
+      newBoard[frontRow][col] = { type: PieceType.PAWN, isWhite: playerColor === "white" }
     }
 
     setBoard(newBoard)
@@ -244,10 +354,12 @@ export default function MoneyChessGame() {
 
     const remainingBudget = 39 - totalCost
 
-    if (currentPlayer) {
+    if (playerColor === "white") {
       setWhiteBudget(remainingBudget)
+      await updateGameSession(gameId, { board_state: newBoard, white_budget: remainingBudget })
     } else {
       setBlackBudget(remainingBudget)
+      await updateGameSession(gameId, { board_state: newBoard, black_budget: remainingBudget })
     }
 
     // Clear selections
@@ -263,13 +375,15 @@ export default function MoneyChessGame() {
     }
 
     // Extract only current player's pieces
-    const playerBoard = board.map((row) => row.map((piece) => (piece?.isWhite === currentPlayer ? piece : null)))
+    const playerBoard = board.map((row) =>
+      row.map((piece) => (piece?.isWhite === (playerColor === "white") ? piece : null)),
+    )
 
     const newSetup: SavedSetup = {
       name: setupName.trim(),
       board: playerBoard,
-      budget: currentPlayer ? whiteBudget : blackBudget,
-      isWhite: currentPlayer,
+      budget: playerColor === "white" ? whiteBudget : blackBudget,
+      isWhite: playerColor === "white",
     }
 
     const updatedSetups = [...savedSetups.filter((s) => s.name !== setupName.trim()), newSetup]
@@ -281,13 +395,15 @@ export default function MoneyChessGame() {
   }
 
   // Load a saved setup
-  const loadSavedSetup = (setup: SavedSetup) => {
+  const loadSavedSetup = async (setup: SavedSetup) => {
+    if (playerColor !== currentPlayerTurn) return // Only current player can load setup
+
     const newBoard = board.map((r) => [...r])
 
     // Clear current player's pieces first
     for (let row = 0; row < 8; row++) {
       for (let col = 0; col < 8; col++) {
-        if (newBoard[row][col]?.isWhite === currentPlayer) {
+        if (newBoard[row][col]?.isWhite === (playerColor === "white")) {
           newBoard[row][col] = null
         }
       }
@@ -297,22 +413,24 @@ export default function MoneyChessGame() {
     for (let row = 0; row < 8; row++) {
       for (let col = 0; col < 8; col++) {
         if (setup.board[row][col]) {
-          newBoard[row][col] = { ...setup.board[row][col]!, isWhite: currentPlayer }
+          newBoard[row][col] = { ...setup.board[row][col]!, isWhite: playerColor === "white" }
         }
       }
     }
 
     setBoard(newBoard)
 
-    if (currentPlayer) {
+    if (playerColor === "white") {
       setWhiteBudget(setup.budget)
+      await updateGameSession(gameId, { board_state: newBoard, white_budget: setup.budget })
     } else {
       setBlackBudget(setup.budget)
+      await updateGameSession(gameId, { board_state: newBoard, black_budget: setup.budget })
     }
 
     // Clear selections
-    setSelectedPosition(null)
-    setPossibleMoves({ visibleMoves: [], fogMoves: [] })
+    setSelectedPiece(null)
+    setSelectedBoardPosition(null)
   }
 
   // Delete a saved setup
@@ -506,7 +624,7 @@ export default function MoneyChessGame() {
     return { visibleMoves, fogMoves }
   }
 
-  const checkGameStatus = (board: (ChessPiece | null)[][], currentPlayer: boolean) => {
+  const checkGameStatus = async (board: (ChessPiece | null)[][], nextPlayerTurn: "white" | "black") => {
     // Find kings
     let whiteKing: BoardPosition | null = null
     let blackKing: BoardPosition | null = null
@@ -524,13 +642,24 @@ export default function MoneyChessGame() {
       }
     }
 
+    let newGameStatus = ""
+    let newGamePhase = GamePhase.PLAYING
+
     // Check if current player's king is missing (captured)
-    if (currentPlayer && whiteKing === null) {
-      setGameStatus("Black wins! White king captured.")
-    } else if (!currentPlayer && blackKing === null) {
-      setGameStatus("White wins! Black king captured.")
-    } else {
-      setGameStatus("")
+    if (nextPlayerTurn === "black" && whiteKing === null) {
+      // White's turn just ended, check if white king was captured
+      newGameStatus = "Black wins! White king captured."
+      newGamePhase = GamePhase.GAME_OVER
+    } else if (nextPlayerTurn === "white" && blackKing === null) {
+      // Black's turn just ended, check if black king was captured
+      newGameStatus = "White wins! Black king captured."
+      newGamePhase = GamePhase.GAME_OVER
+    }
+
+    setGameStatus(newGameStatus)
+    if (newGamePhase === GamePhase.GAME_OVER) {
+      setGamePhase(newGamePhase)
+      await updateGameSession(gameId, { status: "finished" })
     }
   }
 
@@ -585,33 +714,45 @@ export default function MoneyChessGame() {
     return toPos
   }
 
-  const handleSquareClick = (row: number, col: number) => {
+  const handleSquareClick = async (row: number, col: number) => {
+    if (gamePhase === GamePhase.GAME_OVER || playerColor !== currentPlayerTurn) {
+      toast({
+        title: "Not your turn or game over",
+        description: "Please wait for your turn or start a new game.",
+        variant: "destructive",
+      })
+      return
+    }
+
     const position = { row, col }
     const piece = board[row][col]
+    const isCurrentPlayerWhite = playerColor === "white"
 
     if (gamePhase === GamePhase.SETUP) {
       const canPlacePiece =
-        selectedPiece !== null && piece === null && ((currentPlayer && row >= 5) || (!currentPlayer && row <= 2))
+        selectedPiece !== null &&
+        piece === null &&
+        ((isCurrentPlayerWhite && row >= 5) || (!isCurrentPlayerWhite && row <= 2))
 
       const canSelectPiece =
         piece !== null &&
-        piece.isWhite === currentPlayer &&
-        ((currentPlayer && row >= 5) || (!currentPlayer && row <= 2))
+        piece.isWhite === isCurrentPlayerWhite &&
+        ((isCurrentPlayerWhite && row >= 5) || (!isCurrentPlayerWhite && row <= 2))
 
       if (selectedBoardPosition) {
         // We have a piece selected from the board - try to move it
         const selectedSquarePiece = board[selectedBoardPosition.row][selectedBoardPosition.col]
         if (
           selectedSquarePiece &&
-          ((currentPlayer && row >= 5) || (!currentPlayer && row <= 2)) &&
-          (piece === null || piece.isWhite !== currentPlayer)
+          ((isCurrentPlayerWhite && row >= 5) || (!isCurrentPlayerWhite && row <= 2)) &&
+          (piece === null || piece.isWhite !== isCurrentPlayerWhite) // Allow moving to empty or opponent's square
         ) {
           const newBoard = board.map((r) => [...r])
 
           // If moving to occupied square, refund the piece being replaced
-          if (piece && piece.isWhite === currentPlayer) {
+          if (piece && piece.isWhite === isCurrentPlayerWhite && piece.type !== PieceType.KING) {
             const refund = PIECE_COSTS[piece.type]
-            if (currentPlayer) {
+            if (isCurrentPlayerWhite) {
               setWhiteBudget(whiteBudget + refund)
             } else {
               setBlackBudget(blackBudget + refund)
@@ -623,30 +764,45 @@ export default function MoneyChessGame() {
           newBoard[row][col] = selectedSquarePiece
           setBoard(newBoard)
           setSelectedBoardPosition(null)
+          setSelectedPiece(null) // Clear selected piece from palette too
+
+          // Update Supabase
+          await updateGameSession(gameId, {
+            board_state: newBoard,
+            white_budget: isCurrentPlayerWhite
+              ? whiteBudget + (piece?.type !== PieceType.KING ? PIECE_COSTS[piece?.type || PieceType.PAWN] : 0)
+              : whiteBudget,
+            black_budget: !isCurrentPlayerWhite
+              ? blackBudget + (piece?.type !== PieceType.KING ? PIECE_COSTS[piece?.type || PieceType.PAWN] : 0)
+              : blackBudget,
+          })
         } else {
           setSelectedBoardPosition(null)
+          setSelectedPiece(null)
         }
       } else if (canPlacePiece && selectedPiece) {
         // Place new piece
-        const currentBudget = currentPlayer ? whiteBudget : blackBudget
+        const currentBudget = isCurrentPlayerWhite ? whiteBudget : blackBudget
         const cost = PIECE_COSTS[selectedPiece]
 
         if (currentBudget >= cost) {
           const newBoard = board.map((r) => [...r])
-          newBoard[row][col] = { type: selectedPiece, isWhite: currentPlayer }
+          newBoard[row][col] = { type: selectedPiece, isWhite: isCurrentPlayerWhite }
           setBoard(newBoard)
 
-          if (currentPlayer) {
+          if (isCurrentPlayerWhite) {
             setWhiteBudget(whiteBudget - cost)
+            await updateGameSession(gameId, { board_state: newBoard, white_budget: whiteBudget - cost })
           } else {
             setBlackBudget(blackBudget - cost)
+            await updateGameSession(gameId, { board_state: newBoard, black_budget: blackBudget - cost })
           }
           setSelectedPiece(null)
         }
       } else if (canSelectPiece) {
         // Select piece on board for moving
         setSelectedBoardPosition(position)
-        setSelectedPiece(null)
+        setSelectedPiece(null) // Clear piece selection from palette
       } else {
         // Deselect everything
         setSelectedBoardPosition(null)
@@ -675,17 +831,27 @@ export default function MoneyChessGame() {
 
           // Add to move history
           const moveNotation = `${String.fromCharCode(97 + selectedPosition.col)}${8 - selectedPosition.row}-${String.fromCharCode(97 + finalPosition.col)}${8 - finalPosition.row}`
-          setMoveHistory([...moveHistory, moveNotation])
+          const updatedMoveHistory = [...moveHistory, moveNotation]
+          setMoveHistory(updatedMoveHistory)
 
-          // Switch turns
-          setCurrentPlayer(!currentPlayer)
+          // Switch turns and update Supabase
+          const nextPlayer = currentPlayerTurn === "white" ? "black" : "white"
+          setCurrentPlayerTurn(nextPlayer)
           setSelectedPosition(null)
           setPossibleMoves({ visibleMoves: [], fogMoves: [] })
 
-          // Check for game end conditions
-          checkGameStatus(newBoard, !currentPlayer)
+          await updateGameSession(gameId, {
+            board_state: newBoard,
+            current_turn: nextPlayer,
+            move_history: updatedMoveHistory,
+            time_remaining_white: nextPlayer === "white" ? moveTimeLimit : timeRemainingWhite,
+            time_remaining_black: nextPlayer === "black" ? moveTimeLimit : timeRemainingBlack,
+          })
+
+          // Check for game end conditions after the move
+          await checkGameStatus(newBoard, nextPlayer)
         }
-      } else if (piece && piece.isWhite === currentPlayer) {
+      } else if (piece && piece.isWhite === isCurrentPlayerWhite) {
         // Select piece
         setSelectedPosition(position)
         const moves = calculatePossibleMoves(board, position, piece)
@@ -698,8 +864,8 @@ export default function MoneyChessGame() {
     }
   }
 
-  const handleDeleteSelectedPiece = () => {
-    if (selectedBoardPosition && gamePhase === GamePhase.SETUP) {
+  const handleDeleteSelectedPiece = async () => {
+    if (selectedBoardPosition && gamePhase === GamePhase.SETUP && playerColor === currentPlayerTurn) {
       const piece = board[selectedBoardPosition.row][selectedBoardPosition.col]
       if (piece && piece.type !== PieceType.KING) {
         const newBoard = board.map((r) => [...r])
@@ -708,10 +874,12 @@ export default function MoneyChessGame() {
 
         // Refund the piece cost
         const refund = PIECE_COSTS[piece.type]
-        if (currentPlayer) {
+        if (playerColor === "white") {
           setWhiteBudget(whiteBudget + refund)
+          await updateGameSession(gameId, { board_state: newBoard, white_budget: whiteBudget + refund })
         } else {
           setBlackBudget(blackBudget + refund)
+          await updateGameSession(gameId, { board_state: newBoard, black_budget: blackBudget + refund })
         }
 
         setSelectedBoardPosition(null)
@@ -719,48 +887,56 @@ export default function MoneyChessGame() {
     }
   }
 
-  const finishSetup = () => {
+  const finishSetup = async () => {
+    const isCurrentPlayerWhite = playerColor === "white"
     // Check if current player has placed their King
     const hasKing = board.some((row) =>
-      row.some((piece) => piece?.type === PieceType.KING && piece.isWhite === currentPlayer),
+      row.some((piece) => piece?.type === PieceType.KING && piece.isWhite === isCurrentPlayerWhite),
     )
 
     if (!hasKing) {
-      alert(`${currentPlayer ? "White" : "Black"} player must place their King before finishing setup!`)
+      toast({
+        title: "King Missing!",
+        description: `${isCurrentPlayerWhite ? "White" : "Black"} player must place their King before finishing setup!`,
+        variant: "destructive",
+      })
       return
     }
 
-    if (currentPlayer) {
+    if (isCurrentPlayerWhite) {
       setWhiteSetupComplete(true)
+      await updateGameSession(gameId, { white_setup_complete: true })
       if (blackSetupComplete) {
         setGamePhase(GamePhase.PLAYING)
-        setCurrentPlayer(true) // White starts
-        setTimeRemaining(moveTimeLimit)
+        setCurrentPlayerTurn("white") // White starts
+        await updateGameSession(gameId, { status: "in_progress", current_turn: "white" })
       } else {
-        setCurrentPlayer(false)
+        setCurrentPlayerTurn("black") // Switch to black for their setup
+        await updateGameSession(gameId, { current_turn: "black" })
       }
     } else {
       setBlackSetupComplete(true)
+      await updateGameSession(gameId, { black_setup_complete: true })
       if (whiteSetupComplete) {
         setGamePhase(GamePhase.PLAYING)
-        setCurrentPlayer(true) // White starts
-        setTimeRemaining(moveTimeLimit)
+        setCurrentPlayerTurn("white") // White starts
+        await updateGameSession(gameId, { status: "in_progress", current_turn: "white" })
       } else {
-        setCurrentPlayer(true)
+        setCurrentPlayerTurn("white") // Switch to white for their setup
+        await updateGameSession(gameId, { current_turn: "white" })
       }
     }
   }
 
-  const resetGame = () => {
-    setGamePhase(GamePhase.GAME_SETUP)
-    setCurrentPlayer(true)
+  const resetGame = async () => {
+    const newBoard = Array(8)
+      .fill(null)
+      .map(() => Array(8).fill(null))
+    setGamePhase(GamePhase.SETUP) // Go back to setup phase
+    setCurrentPlayerTurn("white")
     setWhiteBudget(39)
     setBlackBudget(39)
-    setBoard(
-      Array(8)
-        .fill(null)
-        .map(() => Array(8).fill(null)),
-    )
+    setBoard(newBoard)
     setWhiteSetupComplete(false)
     setBlackSetupComplete(false)
     setSelectedPosition(null)
@@ -769,16 +945,31 @@ export default function MoneyChessGame() {
     setMoveHistory([])
     setSelectedPiece(null)
     setSelectedBoardPosition(null)
-    setTimeRemaining(moveTimeLimit)
+    setTimeRemainingWhite(moveTimeLimit)
+    setTimeRemainingBlack(moveTimeLimit)
+
+    await updateGameSession(gameId, {
+      board_state: newBoard,
+      current_turn: "white",
+      move_history: [],
+      white_budget: 39,
+      black_budget: 39,
+      white_setup_complete: false,
+      black_setup_complete: false,
+      time_remaining_white: moveTimeLimit,
+      time_remaining_black: moveTimeLimit,
+      status: "in_progress", // Keep in_progress if both players are still there
+    })
   }
 
-  const resetCurrentPlayer = () => {
+  const resetCurrentPlayerSetup = async () => {
+    const isCurrentPlayerWhite = playerColor === "white"
     const newBoard = board.map((row) =>
       row.map((piece) => {
         // Keep the king but move it back to default position, remove all other pieces
-        if (piece?.isWhite === currentPlayer && piece.type === PieceType.KING) {
+        if (piece?.isWhite === isCurrentPlayerWhite && piece.type === PieceType.KING) {
           return null // We'll place it back in the right spot
-        } else if (piece?.isWhite === currentPlayer) {
+        } else if (piece?.isWhite === isCurrentPlayerWhite) {
           return null // Remove other pieces
         }
         return piece // Keep opponent's pieces
@@ -786,18 +977,39 @@ export default function MoneyChessGame() {
     )
 
     // Place the king back in its default position
-    const defaultPos = getDefaultKingPosition(currentPlayer)
-    newBoard[defaultPos.row][defaultPos.col] = { type: PieceType.KING, isWhite: currentPlayer }
+    const defaultPos = getDefaultKingPosition(isCurrentPlayerWhite)
+    newBoard[defaultPos.row][defaultPos.col] = { type: PieceType.KING, isWhite: isCurrentPlayerWhite }
 
     setBoard(newBoard)
 
-    if (currentPlayer) {
+    if (isCurrentPlayerWhite) {
       setWhiteBudget(39)
+      await updateGameSession(gameId, { board_state: newBoard, white_budget: 39 })
     } else {
       setBlackBudget(39)
+      await updateGameSession(gameId, { board_state: newBoard, black_budget: 39 })
     }
     setSelectedBoardPosition(null)
     setSelectedPiece(null)
+  }
+
+  const handleTurnEnd = async (isWhiteTurn: boolean) => {
+    const nextPlayer = isWhiteTurn ? "black" : "white"
+    setCurrentPlayerTurn(nextPlayer)
+    setSelectedPosition(null)
+    setPossibleMoves({ visibleMoves: [], fogMoves: [] })
+
+    await updateGameSession(gameId, {
+      current_turn: nextPlayer,
+      time_remaining_white: isWhiteTurn ? 0 : timeRemainingWhite,
+      time_remaining_black: !isWhiteTurn ? 0 : timeRemainingBlack,
+    })
+
+    toast({
+      title: "Time's Up!",
+      description: `${isWhiteTurn ? "White" : "Black"}'s time ran out. It's ${nextPlayer}'s turn.`,
+      variant: "destructive",
+    })
   }
 
   // Format time for display
@@ -808,29 +1020,32 @@ export default function MoneyChessGame() {
   }
 
   // Get visible squares for current player
-  const visibleSquares = calculateVisibleSquares(board, currentPlayer)
+  const visibleSquares = calculateVisibleSquares(board, playerColor === "white")
 
-  // Game Setup Screen
-  if (gamePhase === GamePhase.GAME_SETUP) {
+  if (!user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-amber-50 to-orange-100 p-4">
+        <Loader2 className="h-8 w-8 animate-spin text-amber-900" />
+        <span className="ml-2 text-amber-900">Loading user data...</span>
+      </div>
+    )
+  }
+
+  if (gamePhase === GamePhase.WAITING_FOR_OPPONENT) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-amber-50 to-orange-100 p-4">
         <Card className="w-full max-w-md text-center">
           <CardHeader>
-            <CardTitle className="text-4xl font-bold text-amber-900">Money Chess</CardTitle>
+            <CardTitle className="text-2xl font-bold text-amber-900">Waiting for Opponent</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-6">
-            <p className="text-lg text-gray-700">
-              Welcome to Money Chess, where strategy meets economy! Build your army with a budget and outsmart your
-              opponent.
-            </p>
-            <div className="space-y-4">
-              <Button asChild className="w-full">
-                <Link href="/auth">Login / Sign Up</Link>
-              </Button>
-              <Button asChild variant="outline" className="w-full bg-transparent">
-                <Link href="/matchmaking">Play as Guest (Limited Features)</Link>
-              </Button>
-            </div>
+          <CardContent className="space-y-4">
+            <Loader2 className="h-12 w-12 animate-spin mx-auto text-amber-700" />
+            <p className="text-lg text-gray-700">Share this game ID with a friend:</p>
+            <Input type="text" value={gameId} readOnly className="text-center font-mono text-lg" />
+            <Button onClick={() => navigator.clipboard.writeText(gameId)} className="w-full">
+              Copy Game ID
+            </Button>
+            <p className="text-sm text-gray-500">Once an opponent joins, the game setup will begin.</p>
           </CardContent>
         </Card>
       </div>
@@ -843,33 +1058,46 @@ export default function MoneyChessGame() {
         <h1 className="text-4xl font-bold text-center mb-8 text-amber-900">Money Chess</h1>
 
         {/* Game Status */}
-        <Card className={`mb-6 ${currentPlayer ? "bg-slate-100" : "bg-slate-800"}`}>
+        <Card className={`mb-6 ${currentPlayerTurn === "white" ? "bg-slate-100" : "bg-slate-800"}`}>
           <CardContent className="p-6 text-center">
-            <h2 className={`text-2xl font-bold mb-2 ${currentPlayer ? "text-black" : "text-white"}`}>
-              {gamePhase === GamePhase.SETUP ? "Setup Phase" : `Playing - ${currentPlayer ? "White" : "Black"}'s Turn`}
+            <h2 className={`text-2xl font-bold mb-2 ${currentPlayerTurn === "white" ? "text-black" : "text-white"}`}>
+              {gamePhase === GamePhase.SETUP
+                ? "Setup Phase"
+                : `Playing - ${currentPlayerTurn === "white" ? "White" : "Black"}'s Turn`}
             </h2>
 
             {gamePhase === GamePhase.SETUP && (
               <>
-                <p className={`text-lg ${currentPlayer ? "text-black" : "text-white"}`}>
-                  {currentPlayer ? "White" : "Black"} Player's Turn
+                <p className={`text-lg ${currentPlayerTurn === "white" ? "text-black" : "text-white"}`}>
+                  {playerColor === currentPlayerTurn ? "Your Turn to Setup" : "Waiting for Opponent's Setup"}
                 </p>
-                <p className={`text-md ${currentPlayer ? "text-black" : "text-white"}`}>
-                  Budget: {currentPlayer ? whiteBudget : blackBudget} points
+                <p className={`text-md ${currentPlayerTurn === "white" ? "text-black" : "text-white"}`}>
+                  Budget: {playerColor === "white" ? whiteBudget : blackBudget} points
                 </p>
               </>
             )}
 
             {gamePhase === GamePhase.PLAYING && (
               <div className="flex items-center justify-center gap-4">
-                <div className={`flex items-center gap-2 ${currentPlayer ? "text-black" : "text-white"}`}>
+                <div
+                  className={`flex items-center gap-2 ${currentPlayerTurn === "white" ? "text-black" : "text-white"}`}
+                >
                   <Clock className="h-5 w-5" />
-                  <span className={`text-lg font-mono ${timeRemaining <= 30 ? "text-red-500 font-bold" : ""}`}>
-                    {formatTime(timeRemaining)}
+                  <span
+                    className={`text-lg font-mono ${
+                      (currentPlayerTurn === "white" && timeRemainingWhite <= 30) ||
+                      (currentPlayerTurn === "black" && timeRemainingBlack <= 30)
+                        ? "text-red-500 font-bold"
+                        : ""
+                    }`}
+                  >
+                    {formatTime(currentPlayerTurn === "white" ? timeRemainingWhite : timeRemainingBlack)}
                   </span>
                 </div>
                 {fogOfWarEnabled && (
-                  <div className={`flex items-center gap-2 ${currentPlayer ? "text-black" : "text-white"}`}>
+                  <div
+                    className={`flex items-center gap-2 ${currentPlayerTurn === "white" ? "text-black" : "text-white"}`}
+                  >
                     <EyeOff className="h-4 w-4" />
                     <span className="text-sm">Fog of War</span>
                   </div>
@@ -883,7 +1111,7 @@ export default function MoneyChessGame() {
 
         <div className="flex gap-6">
           {/* Left side - Setup Controls (only during setup) */}
-          {gamePhase === GamePhase.SETUP && (
+          {gamePhase === GamePhase.SETUP && playerColor === currentPlayerTurn && (
             <div className="w-64 space-y-4">
               {/* Presets Section */}
               <Card>
@@ -967,7 +1195,7 @@ export default function MoneyChessGame() {
                   <h3 className="text-lg font-semibold mb-4">Select pieces:</h3>
                   <div className="space-y-2">
                     {PURCHASABLE_PIECES.map((pieceType) => {
-                      const currentBudget = currentPlayer ? whiteBudget : blackBudget
+                      const currentBudget = playerColor === "white" ? whiteBudget : blackBudget
                       const cost = PIECE_COSTS[pieceType]
                       const canAfford = currentBudget >= cost
                       const isSelected = selectedPiece === pieceType
@@ -1041,10 +1269,22 @@ export default function MoneyChessGame() {
                 <Button onClick={finishSetup} size="lg" className="w-full">
                   Finish Setup
                 </Button>
-                <Button onClick={resetCurrentPlayer} variant="destructive" size="lg" className="w-full">
-                  Reset
+                <Button onClick={resetCurrentPlayerSetup} variant="destructive" size="lg" className="w-full">
+                  Reset My Setup
                 </Button>
               </div>
+            </div>
+          )}
+          {gamePhase === GamePhase.SETUP && playerColor !== currentPlayerTurn && (
+            <div className="w-64 space-y-4">
+              <Card>
+                <CardContent className="p-4 text-center">
+                  <Loader2 className="h-8 w-8 animate-spin mx-auto mb-4 text-amber-700" />
+                  <p className="text-lg font-medium">
+                    Waiting for {currentPlayerTurn === "white" ? "White" : "Black"} to complete setup...
+                  </p>
+                </CardContent>
+              </Card>
             </div>
           )}
 
@@ -1068,12 +1308,13 @@ export default function MoneyChessGame() {
                     const isFogMoveTarget = possibleMoves.fogMoves.some((move) => move.row === row && move.col === col)
 
                     const isVisible = gamePhase !== GamePhase.PLAYING || visibleSquares[row][col]
-                    const showPiece = piece && (isVisible || piece.isWhite === currentPlayer)
+                    const showPiece = piece && (isVisible || piece.isWhite === (playerColor === "white"))
 
                     return (
                       <button
                         key={index}
                         onClick={() => handleSquareClick(row, col)}
+                        disabled={gamePhase === GamePhase.GAME_OVER || playerColor !== currentPlayerTurn}
                         className={`
                           aspect-square relative border border-gray-400 text-2xl font-bold transition-all
                           ${
@@ -1092,7 +1333,7 @@ export default function MoneyChessGame() {
                                         : "bg-gray-500"
                           }
                           ${isSelected || isVisibleMove || isFogMoveTarget || isBoardSelected ? "border-2 border-black" : ""}
-                          hover:opacity-80
+                          ${gamePhase === GamePhase.GAME_OVER || playerColor !== currentPlayerTurn ? "cursor-not-allowed opacity-70" : "hover:opacity-80"}
                         `}
                       >
                         {showPiece && (
