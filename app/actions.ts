@@ -1,123 +1,182 @@
 "use server"
 
-import { revalidatePath } from "next/cache"
 import { createClient } from "@/lib/supabase/server"
-import type { ChessPiece } from "@/components/money-chess-game" // Import types from the game component
+import { cookies } from "next/headers"
+import { redirect } from "next/navigation"
 
-// Define the initial empty board state
-const initialBoardState = Array(8)
-  .fill(null)
-  .map(() => Array(8).fill(null))
+interface CreateGameSessionParams {
+  player1Id: string
+  gameName: string
+  isPrivate: boolean
+  password?: string | null
+  fogOfWarEnabled: boolean
+  moveTimeLimit: number
+}
 
-export async function createGameSession(player1Id: string) {
-  const supabase = createClient()
+export async function createGameSession({
+  player1Id,
+  gameName,
+  isPrivate,
+  password,
+  fogOfWarEnabled,
+  moveTimeLimit,
+}: CreateGameSessionParams) {
+  const cookieStore = cookies()
+  const supabase = createClient(cookieStore)
 
   const { data, error } = await supabase
     .from("game_sessions")
     .insert({
       player1_id: player1Id,
-      status: "waiting",
-      board_state: initialBoardState, // Initialize with empty board
-      current_turn: "white",
-      move_history: [],
-      fog_of_war_enabled: false, // Default settings
-      move_time_limit: 300,
-      white_budget: 39,
-      black_budget: 39,
-      white_setup_complete: false,
-      black_setup_complete: false,
-      time_remaining_white: 300,
-      time_remaining_black: 300,
+      game_name: gameName,
+      is_private: isPrivate,
+      password: password,
+      fog_of_war_enabled: fogOfWarEnabled,
+      move_time_limit: moveTimeLimit,
     })
-    .select("id")
+    .select()
     .single()
 
   if (error) {
     console.error("Error creating game session:", error)
-    return { gameId: null, error: error.message }
+    return { data: null, error: { message: error.message, code: error.code } }
   }
 
-  revalidatePath("/matchmaking")
-  return { gameId: data.id, error: null }
+  return { data, error: null }
 }
 
-export async function joinGameSession(gameId: string, player2Id: string) {
-  const supabase = createClient()
+export async function joinGameSession(gameId: string, playerId: string) {
+  const cookieStore = cookies()
+  const supabase = createClient(cookieStore)
 
-  const { data: session, error: fetchError } = await supabase
+  // Check if the game exists and is not full
+  const { data: existingGame, error: fetchError } = await supabase
     .from("game_sessions")
     .select("*")
     .eq("id", gameId)
     .single()
 
-  if (fetchError || !session) {
+  if (fetchError || !existingGame) {
     console.error("Error fetching game session:", fetchError)
-    return { error: fetchError?.message || "Game session not found." }
+    return { data: null, error: { message: "Game not found or an error occurred.", code: fetchError?.code || "404" } }
   }
 
-  if (session.player1_id === player2Id) {
-    return { error: "You are already Player 1 in this game." }
+  if (existingGame.player1_id === playerId || existingGame.player2_id === playerId) {
+    // Player is already in this game
+    return { data: existingGame, error: null }
   }
 
-  if (session.player2_id !== null) {
-    return { error: "This game already has two players." }
+  if (existingGame.player2_id) {
+    return { data: null, error: { message: "Game is already full.", code: "409" } }
   }
 
-  const { error: updateError } = await supabase
+  // Update the game session to add player2
+  const { data, error } = await supabase
     .from("game_sessions")
-    .update({
-      player2_id: player2Id,
-      status: "in_progress", // Change status to in_progress once two players join
-    })
+    .update({ player2_id: playerId })
     .eq("id", gameId)
-
-  if (updateError) {
-    console.error("Error joining game session:", updateError)
-    return { error: updateError.message }
-  }
-
-  revalidatePath("/matchmaking")
-  revalidatePath(`/game/${gameId}`)
-  return { error: null }
-}
-
-export async function updateGameSession(
-  gameId: string,
-  updates: {
-    board_state?: (ChessPiece | null)[][]
-    current_turn?: "white" | "black"
-    move_history?: string[]
-    white_budget?: number
-    black_budget?: number
-    white_setup_complete?: boolean
-    black_setup_complete?: boolean
-    time_remaining_white?: number
-    time_remaining_black?: number
-    status?: string
-  },
-) {
-  const supabase = createClient()
-
-  const { error } = await supabase.from("game_sessions").update(updates).eq("id", gameId)
+    .select()
+    .single()
 
   if (error) {
-    console.error("Error updating game session:", error)
-    return { error: error.message }
+    console.error("Error joining game session:", error)
+    return { data: null, error: { message: error.message, code: error.code } }
   }
 
-  revalidatePath(`/game/${gameId}`)
-  return { error: null }
+  return { data, error: null }
+}
+
+export async function joinPrivateGameSession(gameId: string, passwordAttempt: string, playerId: string) {
+  const cookieStore = cookies()
+  const supabase = createClient(cookieStore)
+
+  const { data: game, error: fetchError } = await supabase.from("game_sessions").select("*").eq("id", gameId).single()
+
+  if (fetchError || !game) {
+    return { data: null, error: { message: "Game not found.", code: fetchError?.code || "404" } }
+  }
+
+  if (!game.is_private) {
+    return { data: null, error: { message: 'This is a public game. Use "Join Game" instead.', code: "400" } }
+  }
+
+  if (game.password !== passwordAttempt) {
+    return { data: null, error: { message: "Incorrect password.", code: "401" } }
+  }
+
+  if (game.player1_id === playerId || game.player2_id === playerId) {
+    // Player is already in this game
+    return { data: game, error: null }
+  }
+
+  if (game.player2_id) {
+    return { data: null, error: { message: "Game is already full.", code: "409" } }
+  }
+
+  const { data: updatedGame, error: updateError } = await supabase
+    .from("game_sessions")
+    .update({ player2_id: playerId })
+    .eq("id", gameId)
+    .select()
+    .single()
+
+  if (updateError) {
+    console.error("Error updating private game session:", updateError)
+    return { data: null, error: { message: updateError.message, code: updateError.code } }
+  }
+
+  return { data: updatedGame, error: null }
+}
+
+export async function getPublicGameSessions() {
+  const cookieStore = cookies()
+  const supabase = createClient(cookieStore)
+
+  const { data, error } = await supabase
+    .from("game_sessions")
+    .select("*")
+    .eq("is_private", false)
+    .is("player2_id", null) // Only show games that are not full
+
+  if (error) {
+    console.error("Error fetching public game sessions:", error)
+    return { data: null, error: { message: error.message, code: error.code } }
+  }
+
+  return { data, error: null }
 }
 
 export async function getGameSession(gameId: string) {
-  const supabase = createClient()
+  const cookieStore = cookies()
+  const supabase = createClient(cookieStore)
 
   const { data, error } = await supabase.from("game_sessions").select("*").eq("id", gameId).single()
 
   if (error) {
     console.error("Error fetching game session:", error)
-    return { session: null, error: error.message }
+    return { data: null, error: { message: error.message, code: error.code } }
   }
 
-  return { session: data, error: null }
+  return { data, error: null }
+}
+
+export async function updateGameSession(gameId: string, updates: Record<string, any>) {
+  const cookieStore = cookies()
+  const supabase = createClient(cookieStore)
+
+  const { data, error } = await supabase.from("game_sessions").update(updates).eq("id", gameId).select().single()
+
+  if (error) {
+    console.error("Error updating game session:", error)
+    return { data: null, error: { message: error.message, code: error.code } }
+  }
+
+  return { data, error: null }
+}
+
+export async function signOut() {
+  const cookieStore = cookies()
+  const supabase = createClient(cookieStore)
+  await supabase.auth.signOut()
+  return redirect("/auth")
 }

@@ -1,86 +1,112 @@
 "use client"
 
-import Link from "next/link"
+import { DialogFooter } from "@/components/ui/dialog"
+
+import { Switch } from "@/components/ui/switch"
+
+import { Input } from "@/components/ui/input"
+
+import { Label } from "@/components/ui/label"
+
+import { DialogDescription } from "@/components/ui/dialog"
+
+import { DialogTitle } from "@/components/ui/dialog"
+
+import { DialogHeader } from "@/components/ui/dialog"
+
+import { DialogContent } from "@/components/ui/dialog"
+
+import { Button } from "@/components/ui/button"
+
+import { DialogTrigger } from "@/components/ui/dialog"
+
+import { Dialog } from "@/components/ui/dialog"
+
+import { CardContent } from "@/components/ui/card"
+
+import { CardDescription } from "@/components/ui/card"
+
+import { CardTitle } from "@/components/ui/card"
+
+import { CardHeader } from "@/components/ui/card"
+
+import { Card } from "@/components/ui/card"
 
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
-import { createClient } from "@/lib/supabase/client"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { toast } from "@/hooks/use-toast"
-import { createGameSession, joinGameSession } from "@/app/actions"
-import { Loader2, PlusCircle, Play } from "lucide-react"
+import { createClient, useUser } from "@/lib/supabase/client"
+import { createGameSession, joinGameSession, joinPrivateGameSession, getPublicGameSessions } from "@/app/actions"
+import { v4 as uuidv4 } from "uuid"
+import { toast } from "@/components/ui/use-toast"
+import { Loader2 } from "lucide-react"
 
 interface GameSession {
   id: string
-  player1_id: string
-  player2_id: string | null
-  status: string
   created_at: string
+  player1_id: string | null
+  player2_id: string | null
+  game_name: string
+  is_private: boolean
+  fog_of_war_enabled: boolean
+  move_time_limit: number
 }
 
 export default function MatchmakingPage() {
-  const [supabase] = useState(() => createClient())
-  const [user, setUser] = useState<any>(null)
-  const [loading, setLoading] = useState(true)
-  const [gameSessions, setGameSessions] = useState<GameSession[]>([])
-  const [creatingGame, setCreatingGame] = useState(false)
   const router = useRouter()
+  const supabase = createClient()
+  const { user, loading: userLoading } = useUser()
+
+  const [gameName, setGameName] = useState("")
+  const [isPrivate, setIsPrivate] = useState(false)
+  const [password, setPassword] = useState("")
+  const [fogOfWarEnabled, setFogOfWarEnabled] = useState(false)
+  const [moveTimeLimit, setMoveTimeLimit] = useState(0) // in seconds
+  const [publicGames, setPublicGames] = useState<GameSession[]>([])
+  const [joiningGameId, setJoiningGameId] = useState("")
+  const [joiningPassword, setJoiningPassword] = useState("")
+  const [isCreatingGame, setIsCreatingGame] = useState(false)
+  const [isJoiningPublicGame, setIsJoiningPublicGame] = useState(false)
+  const [isJoiningPrivateGame, setIsJoiningPrivateGame] = useState(false)
+  const [showCreateGameDialog, setShowCreateGameDialog] = useState(false)
 
   useEffect(() => {
-    const fetchUserAndGames = async () => {
-      setLoading(true)
-      const {
-        data: { user },
-      } = await supabase.auth.getUser()
-      setUser(user)
-
-      const { data: sessions, error } = await supabase
-        .from("game_sessions")
-        .select("*")
-        .eq("status", "waiting")
-        .order("created_at", { ascending: true })
-
+    const fetchPublicGames = async () => {
+      const { data, error } = await getPublicGameSessions()
       if (error) {
+        console.error("Error fetching public games:", error)
         toast({
-          title: "Error fetching games",
-          description: error.message,
+          title: "Error",
+          description: "Failed to fetch public games.",
           variant: "destructive",
         })
       } else {
-        setGameSessions(sessions || [])
+        setPublicGames(data || [])
       }
-      setLoading(false)
     }
 
-    fetchUserAndGames()
+    fetchPublicGames()
 
-    // Set up real-time subscription for game sessions
+    // Realtime listener for new public games
     const channel = supabase
-      .channel("game_sessions_changes")
+      .channel("public_games")
       .on("postgres_changes", { event: "*", schema: "public", table: "game_sessions" }, (payload) => {
         if (payload.eventType === "INSERT" || payload.eventType === "UPDATE") {
-          const newSession = payload.new as GameSession
-          setGameSessions((prev) => {
-            const existingIndex = prev.findIndex((s) => s.id === newSession.id)
-            if (existingIndex > -1) {
-              // Update existing session if it's still waiting
-              if (newSession.status === "waiting") {
-                const updated = [...prev]
-                updated[existingIndex] = newSession
-                return updated
+          const newGame = payload.new as GameSession
+          if (!newGame.is_private) {
+            setPublicGames((prev) => {
+              const existingIndex = prev.findIndex((game) => game.id === newGame.id)
+              if (existingIndex > -1) {
+                // Update existing game
+                return prev.map((game, index) => (index === existingIndex ? newGame : game))
               } else {
-                // Remove if no longer waiting
-                return prev.filter((s) => s.id !== newSession.id)
+                // Add new game
+                return [...prev, newGame]
               }
-            } else if (newSession.status === "waiting") {
-              // Add new waiting session
-              return [...prev, newSession]
-            }
-            return prev
-          })
+            })
+          }
         } else if (payload.eventType === "DELETE") {
-          setGameSessions((prev) => prev.filter((s) => s.id !== payload.old.id))
+          const deletedGameId = payload.old.id
+          setPublicGames((prev) => prev.filter((game) => game.id !== deletedGameId))
         }
       })
       .subscribe()
@@ -90,154 +116,277 @@ export default function MatchmakingPage() {
     }
   }, [supabase])
 
+  const getPlayerId = async () => {
+    if (userLoading) return null // Still loading user info
+    if (user) {
+      return user.id
+    } else {
+      // Generate a guest ID if not logged in
+      let guestId = localStorage.getItem("guest_id")
+      if (!guestId) {
+        guestId = `guest_${uuidv4()}`
+        localStorage.setItem("guest_id", guestId)
+      }
+      return guestId
+    }
+  }
+
   const handleCreateGame = async () => {
-    if (!user) {
+    setIsCreatingGame(true)
+    const playerId = await getPlayerId()
+    if (!playerId) {
       toast({
-        title: "Authentication Required",
-        description: "Please log in or sign up to create a game.",
+        title: "Error",
+        description: "Could not determine player ID. Please try again.",
         variant: "destructive",
       })
-      router.push("/auth")
+      setIsCreatingGame(false)
       return
     }
 
-    setCreatingGame(true)
-    const { gameId, error } = await createGameSession(user.id)
-    setCreatingGame(false)
+    const { data: gameSession, error } = await createGameSession({
+      player1Id: playerId,
+      gameName,
+      isPrivate,
+      password: isPrivate ? password : null,
+      fogOfWarEnabled,
+      moveTimeLimit,
+    })
 
     if (error) {
+      console.error("Error creating game session:", error)
       toast({
-        title: "Error creating game",
-        description: error,
+        title: "Error",
+        description: error.message || "Failed to create game.",
         variant: "destructive",
       })
-    } else if (gameId) {
+    } else if (gameSession) {
       toast({
         title: "Game Created!",
-        description: "Waiting for an opponent...",
+        description: `Game "${gameSession.game_name}" created successfully.`,
       })
-      router.push(`/game/${gameId}`)
+      router.push(`/game/${gameSession.id}`)
     }
+    setIsCreatingGame(false)
+    setShowCreateGameDialog(false)
   }
 
-  const handleJoinGame = async (gameId: string) => {
-    if (!user) {
+  const handleJoinPublicGame = async (gameId: string) => {
+    setIsJoiningPublicGame(true)
+    const playerId = await getPlayerId()
+    if (!playerId) {
       toast({
-        title: "Authentication Required",
-        description: "Please log in or sign up to join a game.",
+        title: "Error",
+        description: "Could not determine player ID. Please try again.",
         variant: "destructive",
       })
-      router.push("/auth")
+      setIsJoiningPublicGame(false)
       return
     }
 
-    const { error } = await joinGameSession(gameId, user.id)
+    const { data: gameSession, error } = await joinGameSession(gameId, playerId)
 
     if (error) {
+      console.error("Error joining game session:", error)
       toast({
-        title: "Error joining game",
-        description: error,
+        title: "Error",
+        description: error.message || "Failed to join game.",
         variant: "destructive",
       })
-    } else {
+    } else if (gameSession) {
       toast({
         title: "Game Joined!",
-        description: "Starting game...",
+        description: `Joined game "${gameSession.game_name}".`,
       })
-      router.push(`/game/${gameId}`)
+      router.push(`/game/${gameSession.id}`)
     }
+    setIsJoiningPublicGame(false)
   }
 
-  const handleLogout = async () => {
-    setLoading(true)
-    const { error } = await supabase.auth.signOut()
-    setLoading(false)
-    if (error) {
+  const handleJoinPrivateGame = async () => {
+    setIsJoiningPrivateGame(true)
+    const playerId = await getPlayerId()
+    if (!playerId) {
       toast({
-        title: "Logout Error",
-        description: error.message,
+        title: "Error",
+        description: "Could not determine player ID. Please try again.",
         variant: "destructive",
       })
-    } else {
-      toast({
-        title: "Logged out",
-        description: "You have been logged out successfully.",
-      })
-      router.push("/")
+      setIsJoiningPrivateGame(false)
+      return
     }
+
+    const { data: gameSession, error } = await joinPrivateGameSession(joiningGameId, joiningPassword, playerId)
+
+    if (error) {
+      console.error("Error joining private game session:", error)
+      toast({
+        title: "Error",
+        description: error.message || "Failed to join private game. Check ID and password.",
+        variant: "destructive",
+      })
+    } else if (gameSession) {
+      toast({
+        title: "Game Joined!",
+        description: `Joined private game "${gameSession.game_name}".`,
+      })
+      router.push(`/game/${gameSession.id}`)
+    }
+    setIsJoiningPrivateGame(false)
   }
 
-  if (loading) {
+  if (userLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-amber-50 to-orange-100 p-4">
-        <Loader2 className="h-8 w-8 animate-spin text-amber-900" />
-        <span className="ml-2 text-amber-900">Loading matchmaking...</span>
+      <div className="flex min-h-screen items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin" />
+        <span className="ml-2">Loading user...</span>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-amber-50 to-orange-100 p-4">
-      <div className="max-w-2xl mx-auto">
-        <h1 className="text-4xl font-bold text-center mb-8 text-amber-900">Matchmaking</h1>
-
-        <Card className="mb-6">
-          <CardHeader>
-            <CardTitle className="text-center">Welcome, {user ? user.email : "Guest"}!</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <Button onClick={handleCreateGame} className="w-full" disabled={creatingGame}>
-              {creatingGame ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Creating Game...
-                </>
-              ) : (
-                <>
-                  <PlusCircle className="mr-2 h-4 w-4" /> Create New Game
-                </>
-              )}
-            </Button>
-            {user && (
-              <Button onClick={handleLogout} variant="outline" className="w-full bg-transparent">
-                Logout
-              </Button>
-            )}
-            {!user && (
-              <Button asChild variant="outline" className="w-full bg-transparent">
-                <Link href="/auth">Login / Sign Up</Link>
-              </Button>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-center">Available Games</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {gameSessions.length === 0 ? (
-              <p className="text-center text-gray-600">No games waiting. Be the first to create one!</p>
-            ) : (
-              <div className="space-y-3">
-                {gameSessions.map((session) => (
-                  <div
-                    key={session.id}
-                    className="flex items-center justify-between p-3 border rounded-lg bg-white shadow-sm"
-                  >
-                    <div>
-                      <p className="font-medium">Game ID: {session.id.substring(0, 8)}...</p>
-                      <p className="text-sm text-gray-600">Created: {new Date(session.created_at).toLocaleString()}</p>
-                    </div>
-                    <Button onClick={() => handleJoinGame(session.id)} disabled={session.player1_id === user?.id}>
-                      <Play className="mr-2 h-4 w-4" /> Join Game
-                    </Button>
+    <div className="flex min-h-screen flex-col items-center justify-center bg-gray-100 p-4 dark:bg-gray-900">
+      <Card className="w-full max-w-2xl">
+        <CardHeader>
+          <CardTitle className="text-3xl font-bold">Matchmaking</CardTitle>
+          <CardDescription>Create or join a Money Chess game.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <Dialog open={showCreateGameDialog} onOpenChange={setShowCreateGameDialog}>
+            <DialogTrigger asChild>
+              <Button className="w-full">Create New Game</Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-[425px]">
+              <DialogHeader>
+                <DialogTitle>Create New Game</DialogTitle>
+                <DialogDescription>Configure your game settings.</DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-4 py-4">
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <Label htmlFor="gameName" className="text-right">
+                    Game Name
+                  </Label>
+                  <Input
+                    id="gameName"
+                    value={gameName}
+                    onChange={(e) => setGameName(e.target.value)}
+                    className="col-span-3"
+                    placeholder="My Awesome Game"
+                  />
+                </div>
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <Label htmlFor="fogOfWar" className="text-right">
+                    Fog of War
+                  </Label>
+                  <Switch
+                    id="fogOfWar"
+                    checked={fogOfWarEnabled}
+                    onCheckedChange={setFogOfWarEnabled}
+                    className="col-span-3"
+                  />
+                </div>
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <Label htmlFor="timeLimit" className="text-right">
+                    Move Time Limit (s)
+                  </Label>
+                  <Input
+                    id="timeLimit"
+                    type="number"
+                    value={moveTimeLimit}
+                    onChange={(e) => setMoveTimeLimit(Number.parseInt(e.target.value) || 0)}
+                    className="col-span-3"
+                    min="0"
+                    placeholder="0 for no limit"
+                  />
+                </div>
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <Label htmlFor="isPrivate" className="text-right">
+                    Private Game
+                  </Label>
+                  <Switch id="isPrivate" checked={isPrivate} onCheckedChange={setIsPrivate} className="col-span-3" />
+                </div>
+                {isPrivate && (
+                  <div className="grid grid-cols-4 items-center gap-4">
+                    <Label htmlFor="password" className="text-right">
+                      Password
+                    </Label>
+                    <Input
+                      id="password"
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      className="col-span-3"
+                      placeholder="Optional password"
+                    />
                   </div>
+                )}
+              </div>
+              <DialogFooter>
+                <Button onClick={handleCreateGame} disabled={isCreatingGame}>
+                  {isCreatingGame && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Create Game
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <div className="space-y-4">
+            <h3 className="text-xl font-semibold">Available Public Games</h3>
+            {publicGames.length === 0 ? (
+              <p className="text-gray-500 dark:text-gray-400">No public games available. Create one!</p>
+            ) : (
+              <div className="grid gap-4">
+                {publicGames.map((game) => (
+                  <Card key={game.id} className="flex items-center justify-between p-4">
+                    <div>
+                      <p className="font-semibold">{game.game_name}</p>
+                      <p className="text-sm text-gray-500 dark:text-gray-400">
+                        Players: {game.player1_id ? "1" : "0"}/2 {game.player2_id ? " (Full)" : ""}
+                      </p>
+                      <p className="text-sm text-gray-500 dark:text-gray-400">
+                        Fog of War: {game.fog_of_war_enabled ? "Enabled" : "Disabled"}
+                      </p>
+                      <p className="text-sm text-gray-500 dark:text-gray-400">
+                        Time Limit: {game.move_time_limit > 0 ? `${game.move_time_limit}s per move` : "No limit"}
+                      </p>
+                    </div>
+                    <Button
+                      onClick={() => handleJoinPublicGame(game.id)}
+                      disabled={isJoiningPublicGame || !!game.player2_id}
+                    >
+                      {isJoiningPublicGame && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                      {game.player2_id ? "Full" : "Join Game"}
+                    </Button>
+                  </Card>
                 ))}
               </div>
             )}
-          </CardContent>
-        </Card>
-      </div>
+          </div>
+
+          <div className="space-y-4">
+            <h3 className="text-xl font-semibold">Join Private Game</h3>
+            <div className="flex gap-2">
+              <Input
+                placeholder="Game ID"
+                value={joiningGameId}
+                onChange={(e) => setJoiningGameId(e.target.value)}
+                className="flex-1"
+              />
+              <Input
+                type="password"
+                placeholder="Password (if any)"
+                value={joiningPassword}
+                onChange={(e) => setJoiningPassword(e.target.value)}
+                className="flex-1"
+              />
+              <Button onClick={handleJoinPrivateGame} disabled={isJoiningPrivateGame || !joiningGameId}>
+                {isJoiningPrivateGame && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Join
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   )
 }
