@@ -1,43 +1,33 @@
 "use client"
 
-import { DialogFooter } from "@/components/ui/dialog"
-
-import { Switch } from "@/components/ui/switch"
-
-import { Input } from "@/components/ui/input"
-
-import { Label } from "@/components/ui/label"
-
-import { DialogDescription } from "@/components/ui/dialog"
-
-import { DialogTitle } from "@/components/ui/dialog"
-
-import { DialogHeader } from "@/components/ui/dialog"
-
-import { DialogContent } from "@/components/ui/dialog"
-
 import { Button } from "@/components/ui/button"
-
-import { DialogTrigger } from "@/components/ui/dialog"
 
 import { Dialog } from "@/components/ui/dialog"
 
+import {
+  DialogFooter,
+  DialogTrigger,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog"
+import { Switch } from "@/components/ui/switch"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { CardContent } from "@/components/ui/card"
-
 import { CardDescription } from "@/components/ui/card"
-
 import { CardTitle } from "@/components/ui/card"
-
 import { CardHeader } from "@/components/ui/card"
-
 import { Card } from "@/components/ui/card"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { createClient, useUser } from "@/lib/supabase/client"
 import { createGameSession, joinGameSession, joinPrivateGameSession, getPublicGameSessions } from "@/app/actions"
 import { v4 as uuidv4 } from "uuid"
-import { toast } from "@/components/ui/use-toast"
+import { toast } from "@/hooks/use-toast" // Using shadcn/ui toast
 import { Loader2 } from "lucide-react"
 
 interface GameSession {
@@ -60,7 +50,7 @@ export default function MatchmakingPage() {
   const [isPrivate, setIsPrivate] = useState(false)
   const [password, setPassword] = useState("")
   const [fogOfWarEnabled, setFogOfWarEnabled] = useState(false)
-  const [moveTimeLimit, setMoveTimeLimit] = useState(0) // in seconds
+  const [moveTimeLimit, setMoveTimeLimit] = useState(300) // Default 5 minutes (300 seconds)
   const [publicGames, setPublicGames] = useState<GameSession[]>([])
   const [joiningGameId, setJoiningGameId] = useState("")
   const [joiningPassword, setJoiningPassword] = useState("")
@@ -92,7 +82,8 @@ export default function MatchmakingPage() {
       .on("postgres_changes", { event: "*", schema: "public", table: "game_sessions" }, (payload) => {
         if (payload.eventType === "INSERT" || payload.eventType === "UPDATE") {
           const newGame = payload.new as GameSession
-          if (!newGame.is_private) {
+          if (!newGame.is_private && newGame.player2_id === null) {
+            // Only show public games waiting for player 2
             setPublicGames((prev) => {
               const existingIndex = prev.findIndex((game) => game.id === newGame.id)
               if (existingIndex > -1) {
@@ -103,6 +94,9 @@ export default function MatchmakingPage() {
                 return [...prev, newGame]
               }
             })
+          } else if (newGame.is_private || newGame.player2_id !== null) {
+            // Remove if it became private or full
+            setPublicGames((prev) => prev.filter((game) => game.id !== newGame.id))
           }
         } else if (payload.eventType === "DELETE") {
           const deletedGameId = payload.old.id
@@ -157,7 +151,7 @@ export default function MatchmakingPage() {
       console.error("Error creating game session:", error)
       toast({
         title: "Error",
-        description: error.message || "Failed to create game.",
+        description: error || "Failed to create game.", // error is now a string
         variant: "destructive",
       })
     } else if (gameSession) {
@@ -190,7 +184,7 @@ export default function MatchmakingPage() {
       console.error("Error joining game session:", error)
       toast({
         title: "Error",
-        description: error.message || "Failed to join game.",
+        description: error || "Failed to join game.", // error is now a string
         variant: "destructive",
       })
     } else if (gameSession) {
@@ -222,7 +216,7 @@ export default function MatchmakingPage() {
       console.error("Error joining private game session:", error)
       toast({
         title: "Error",
-        description: error.message || "Failed to join private game. Check ID and password.",
+        description: error || "Failed to join private game. Check ID and password.", // error is now a string
         variant: "destructive",
       })
     } else if (gameSession) {
@@ -289,15 +283,19 @@ export default function MatchmakingPage() {
                   <Label htmlFor="timeLimit" className="text-right">
                     Move Time Limit (s)
                   </Label>
-                  <Input
-                    id="timeLimit"
-                    type="number"
-                    value={moveTimeLimit}
-                    onChange={(e) => setMoveTimeLimit(Number.parseInt(e.target.value) || 0)}
-                    className="col-span-3"
-                    min="0"
-                    placeholder="0 for no limit"
-                  />
+                  <Select value={String(moveTimeLimit)} onValueChange={(value) => setMoveTimeLimit(Number(value))}>
+                    <SelectTrigger className="col-span-3">
+                      <SelectValue placeholder="Select time limit" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="0">No Limit</SelectItem>
+                      <SelectItem value="60">1 minute</SelectItem>
+                      <SelectItem value="180">3 minutes</SelectItem>
+                      <SelectItem value="300">5 minutes</SelectItem>
+                      <SelectItem value="600">10 minutes</SelectItem>
+                      <SelectItem value="900">15 minutes</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="grid grid-cols-4 items-center gap-4">
                   <Label htmlFor="isPrivate" className="text-right">
@@ -352,7 +350,7 @@ export default function MatchmakingPage() {
                     </div>
                     <Button
                       onClick={() => handleJoinPublicGame(game.id)}
-                      disabled={isJoiningPublicGame || !!game.player2_id}
+                      disabled={isJoiningPublicGame || !!game.player2_id || game.player1_id === getPlayerId()}
                     >
                       {isJoiningPublicGame && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                       {game.player2_id ? "Full" : "Join Game"}

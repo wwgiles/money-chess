@@ -1,67 +1,42 @@
 import { createClient } from "@/lib/supabase/server"
-import { cookies } from "next/headers"
-import { notFound, redirect } from "next/navigation"
+import { redirect } from "next/navigation"
 import MoneyChessGame from "@/components/money-chess-game"
 import { getGameSession } from "@/app/actions"
-import { v4 as uuidv4 } from "uuid"
+import { cookies } from "next/headers"
 
-interface GamePageProps {
-  params: {
-    gameId: string
-  }
-}
-
-export default async function GamePage({ params }: GamePageProps) {
+export default async function GamePage({ params }: { params: { gameId: string } }) {
   const cookieStore = cookies()
   const supabase = createClient(cookieStore)
 
-  const { data: user } = await supabase.auth.getUser()
-  let initialPlayerId: string | null = null
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
 
-  if (user.user) {
-    initialPlayerId = user.user.id
-  } else {
-    // For guests, try to get existing guest_id from cookie or generate a new one
-    let guestId = cookieStore.get("guest_id")?.value
-    if (!guestId) {
-      guestId = `guest_${uuidv4()}`
-      cookieStore.set("guest_id", guestId, { path: "/", maxAge: 60 * 60 * 24 * 365 }) // 1 year
-    }
-    initialPlayerId = guestId
+  const { data: session, error } = await getGameSession(params.gameId)
+
+  if (error || !session) {
+    console.error("Failed to fetch game session:", error)
+    // Redirect to matchmaking or show an error page
+    redirect("/matchmaking")
   }
 
-  if (!initialPlayerId) {
-    // This should ideally not happen if logic above is sound
-    redirect("/auth") // Or some other error page
+  // Determine current player's ID (authenticated or guest)
+  const currentPlayerId: string | null = user?.id || null
+  if (!currentPlayerId) {
+    // Attempt to get guest ID from cookies/headers if not authenticated
+    // In a real app, you might pass this via a custom header from client-side
+    // For now, we'll assume the client-side will handle guest ID persistence
+    // and the RLS policies will use `request.jwt.claims->>'guest_id'`
+    // For server-side rendering, we can't easily get client-side localStorage.
+    // This might require a client-side fetch for initial game state if guest ID is critical for SSR.
+    // For simplicity, we'll rely on the client-side `MoneyChessGame` to determine the active player
+    // based on `player1_id` and `player2_id` from the session.
   }
 
-  const { data: gameSession, error } = await getGameSession(params.gameId)
-
-  if (error || !gameSession) {
-    console.error("Error fetching game session:", error)
-    notFound()
-  }
-
-  // Ensure the current player is part of this game session
-  if (gameSession.player1_id !== initialPlayerId && gameSession.player2_id !== initialPlayerId) {
-    // If the game is private and the user is not a player, redirect
-    if (gameSession.is_private) {
-      redirect("/matchmaking?error=private_game_access_denied")
-    }
-    // If it's a public game and not full, allow joining
-    if (!gameSession.player2_id) {
-      // This case should ideally be handled by the joinGameSession action on the matchmaking page
-      // but as a fallback, we could redirect back to matchmaking or show an error.
-      // For now, let's redirect to matchmaking to ensure proper joining flow.
-      redirect("/matchmaking?error=game_not_joined")
-    }
-    // If it's a public game and full, and the user is not a player, deny access
-    redirect("/matchmaking?error=game_full")
-  }
-
+  // Pass initial game state to the client component
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-gray-100 dark:bg-gray-900">
-      <MoneyChessGame initialGameSession={gameSession} initialPlayerId={initialPlayerId} />
+    <div className="flex min-h-screen items-center justify-center bg-gray-100 dark:bg-gray-900">
+      <MoneyChessGame initial={session} currentUserId={currentPlayerId} />
     </div>
   )
 }

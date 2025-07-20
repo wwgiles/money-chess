@@ -1,104 +1,184 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useMemo } from "react"
 import { Chessboard } from "react-chessboard"
 import { Chess } from "chess.js"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Label } from "@/components/ui/label"
-import { Slider } from "@/components/ui/slider"
-import { toast } from "@/components/ui/use-toast"
-import { createClient } from "@/lib/supabase/client"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog"
+import { toast } from "@/hooks/use-toast"
 import { updateGameSession } from "@/app/actions"
-import { Loader2 } from "lucide-react"
+import { createClient } from "@/lib/supabase/client"
+import { CheckCircle2 } from "lucide-react"
 
+// Define types for ChessPiece and BoardState
+export type ChessPieceType = "p" | "n" | "b" | "r" | "q" | "k"
+export type ChessPieceColor = "w" | "b"
+export interface ChessPiece {
+  type: ChessPieceType
+  color: ChessPieceColor
+}
+export type BoardState = (ChessPiece | null)[][]
+
+// Define the GameSession interface based on your Supabase table
 interface GameSession {
   id: string
   created_at: string
   player1_id: string | null
   player2_id: string | null
+  status: string
+  board_state: BoardState // Use the defined BoardState type
+  current_turn: "white" | "black"
+  move_history: string[]
+  fog_of_war_enabled: boolean
+  move_time_limit: number
+  white_budget: number
+  black_budget: number
+  white_setup_complete: boolean
+  black_setup_complete: boolean
+  time_remaining_white: number
+  time_remaining_black: number
   game_name: string
   is_private: boolean
   password?: string | null
-  fog_of_war_enabled: boolean
-  move_time_limit: number
-  board_state?: string | null
-  player1_setup?: string | null
-  player2_setup?: string | null
-  current_turn?: string | null
-  game_status?: "waiting" | "setup" | "playing" | "finished" | "aborted"
-  last_move_at?: string | null
 }
 
 interface MoneyChessGameProps {
-  initialGameSession: GameSession
-  initialPlayerId: string
+  initial: GameSession
+  currentUserId: string | null // The ID of the user viewing this page (authenticated or guest)
 }
 
-export default function MoneyChessGame({ initialGameSession, initialPlayerId }: MoneyChessGameProps) {
+const pieceValues: Record<ChessPieceType, number> = {
+  p: 1,
+  n: 3,
+  b: 3,
+  r: 5,
+  q: 9,
+  k: 0, // King has no material value
+}
+
+export default function MoneyChessGame({ initial, currentUserId }: MoneyChessGameProps) {
   const supabase = createClient()
-  const [game, setGame] = useState(new Chess(initialGameSession.board_state || undefined))
-  const [gameSession, setGameSession] = useState<GameSession>(initialGameSession)
-  const [playerColor, setPlayerColor] = useState<"white" | "black" | null>(null)
-  const [isPlayerTurn, setIsPlayerTurn] = useState(false)
-  const [setupBudget, setSetupBudget] = useState(1000) // Example budget
-  const [playerSetup, setPlayerSetup] = useState<Record<string, string>>({}) // { 'e2': 'P', 'd1': 'Q' }
+  const gameId = initial.id
+  const [game, setGame] = useState(new Chess())
+  const [boardFen, setBoardFen] = useState(
+    initial.board_state
+      ? game
+          .board()
+          .flat()
+          .map((p) => (p ? `${p.color}${p.type}` : ""))
+          .join("/")
+      : "8/8/8/8/8/8/8/8",
+  ) // Initialize with empty board FEN
+  const [session, setSession] = useState<GameSession>(initial)
   const [isSetupMode, setIsSetupMode] = useState(false)
-  const [isSubmittingSetup, setIsSubmittingSetup] = useState(false)
-  const [opponentSetupSubmitted, setOpponentSetupSubmitted] = useState(false)
+  const [selectedPiece, setSelectedPiece] = useState<ChessPieceType | null>(null)
+  const [whiteBudget, setWhiteBudget] = useState(initial.white_budget)
+  const [blackBudget, setBlackBudget] = useState(initial.black_budget)
+  const [whiteSetupComplete, setWhiteSetupComplete] = useState(initial.white_setup_complete)
+  const [blackSetupComplete, setBlackSetupComplete] = useState(initial.black_setup_complete)
+  const [setupDialogOpen, setSetupDialogOpen] = useState(false)
+  const [playerColor, setPlayerColor] = useState<"white" | "black" | null>(null)
+  const [timeRemainingWhite, setTimeRemainingWhite] = useState(initial.time_remaining_white)
+  const [timeRemainingBlack, setTimeRemainingBlack] = useState(initial.time_remaining_black)
+  const [timerActive, setTimerActive] = useState(false)
 
-  const isPlayer1 = initialPlayerId === gameSession.player1_id
-  const isPlayer2 = initialPlayerId === gameSession.player2_id
-
+  // Determine player color based on currentUserId and session player IDs
   useEffect(() => {
-    // Determine player color and setup mode
-    if (gameSession.player1_id && gameSession.player2_id) {
-      if (isPlayer1) {
-        setPlayerColor("white")
-        setIsSetupMode(!gameSession.player1_setup)
-      } else if (isPlayer2) {
-        setPlayerColor("black")
-        setIsSetupMode(!gameSession.player2_setup)
+    if (currentUserId === session.player1_id) {
+      setPlayerColor("white")
+    } else if (currentUserId === session.player2_id) {
+      setPlayerColor("black")
+    } else {
+      setPlayerColor(null) // Spectator
+    }
+  }, [currentUserId, session.player1_id, session.player2_id])
+
+  // Initialize game state from session
+  useEffect(() => {
+    if (session.board_state) {
+      const newGame = new Chess()
+      // Convert board_state to FEN string for chess.js
+      const boardArray = session.board_state.map((row) =>
+        row.map((piece) => {
+          if (!piece) return null
+          return { square: "", type: piece.type, color: piece.color } // square is not used by fen()
+        }),
+      )
+      // This is a simplified way to set FEN from a custom board state.
+      // A more robust solution would involve iterating and building FEN string manually
+      // or using a utility that converts MoneyChess board_state to FEN.
+      // For now, we'll assume the board_state is directly convertible or handled by Chessboard component.
+      // For react-chessboard, it can directly take a board array or FEN.
+      // Let's convert the board_state to a FEN string for chess.js
+      let fen = ""
+      for (let r = 0; r < 8; r++) {
+        let emptyCount = 0
+        for (let c = 0; c < 8; c++) {
+          const piece = session.board_state[r][c]
+          if (piece) {
+            if (emptyCount > 0) {
+              fen += emptyCount
+              emptyCount = 0
+            }
+            fen += piece.color === "w" ? piece.type.toUpperCase() : piece.type
+          } else {
+            emptyCount++
+          }
+        }
+        if (emptyCount > 0) {
+          fen += emptyCount
+        }
+        if (r < 7) {
+          fen += "/"
+        }
       }
-    } else {
-      // Still waiting for opponent
+      fen += ` ${session.current_turn === "white" ? "w" : "b"} - - 0 1` // Simplified FEN suffix
+      newGame.load(fen)
+      setGame(newGame)
+      setBoardFen(newGame.fen())
+    }
+
+    setWhiteBudget(session.white_budget)
+    setBlackBudget(session.black_budget)
+    setWhiteSetupComplete(session.white_setup_complete)
+    setBlackSetupComplete(session.black_setup_complete)
+    setTimeRemainingWhite(session.time_remaining_white)
+    setTimeRemainingBlack(session.time_remaining_black)
+
+    // Determine if setup mode should be active
+    if (session.status === "waiting" && session.player1_id && session.player2_id) {
+      if (
+        (playerColor === "white" && !session.white_setup_complete) ||
+        (playerColor === "black" && !session.black_setup_complete)
+      ) {
+        setIsSetupMode(true)
+        setSetupDialogOpen(true)
+      }
+    } else if (session.status === "in_progress") {
       setIsSetupMode(false)
+      setSetupDialogOpen(false)
+      setTimerActive(true)
     }
+  }, [session, playerColor])
 
-    // Check if opponent has submitted setup
-    if (isPlayer1 && gameSession.player2_setup) {
-      setOpponentSetupSubmitted(true)
-    } else if (isPlayer2 && gameSession.player1_setup) {
-      setOpponentSetupSubmitted(true)
-    } else {
-      setOpponentSetupSubmitted(false)
-    }
-
-    // Set initial turn status
-    if (gameSession.game_status === "playing") {
-      setIsPlayerTurn((game.turn() === "w" && isPlayer1) || (game.turn() === "b" && isPlayer2))
-    } else {
-      setIsPlayerTurn(false)
-    }
-  }, [gameSession, isPlayer1, isPlayer2, game])
-
+  // Real-time subscription for game updates
   useEffect(() => {
     const channel = supabase
-      .channel(`game_session:${initialGameSession.id}`)
+      .channel(`game_${gameId}`)
       .on(
         "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "game_sessions",
-          filter: `id=eq.${initialGameSession.id}`,
-        },
+        { event: "UPDATE", schema: "public", table: "game_sessions", filter: `id=eq.${gameId}` },
         (payload) => {
           const updatedSession = payload.new as GameSession
-          setGameSession(updatedSession)
-          if (updatedSession.board_state) {
-            setGame(new Chess(updatedSession.board_state))
-          }
+          setSession(updatedSession) // Update local session state
         },
       )
       .subscribe()
@@ -106,214 +186,312 @@ export default function MoneyChessGame({ initialGameSession, initialPlayerId }: 
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [supabase, initialGameSession.id])
+  }, [supabase, gameId])
+
+  // Timer logic
+  useEffect(() => {
+    let timer: NodeJS.Timeout | undefined
+    if (timerActive && session.status === "in_progress" && session.move_time_limit > 0) {
+      timer = setInterval(() => {
+        setSession((prevSession) => {
+          const newSession = { ...prevSession }
+          if (newSession.current_turn === "white") {
+            newSession.time_remaining_white = Math.max(0, newSession.time_remaining_white - 1)
+          } else {
+            newSession.time_remaining_black = Math.max(0, newSession.time_remaining_black - 1)
+          }
+
+          // Check for time out
+          if (newSession.time_remaining_white === 0 || newSession.time_remaining_black === 0) {
+            clearInterval(timer)
+            setTimerActive(false)
+            // Handle game end due to timeout
+            toast({
+              title: "Time Out!",
+              description: `${newSession.current_turn === "white" ? "White" : "Black"} ran out of time.`,
+              variant: "destructive",
+            })
+            updateGameSession(gameId, { status: "completed" }) // Mark game as completed
+          }
+          return newSession
+        })
+      }, 1000)
+    }
+    return () => clearInterval(timer)
+  }, [timerActive, session.status, session.current_turn, session.move_time_limit, gameId])
 
   const onDrop = useCallback(
-    (sourceSquare: string, targetSquare: string, piece: string) => {
+    async (sourceSquare: string, targetSquare: string, piece: string) => {
+      const whiteBudget = session.white_budget
+      const blackBudget = session.black_budget
+
       if (isSetupMode) {
         // Handle piece placement in setup mode
-        // This is a simplified example, actual logic would involve budget, valid placements etc.
-        const newSetup = { ...playerSetup }
-        if (newSetup[sourceSquare] === piece) {
-          delete newSetup[sourceSquare] // Remove if dragging from own setup
+        const pieceType = piece.toLowerCase() as ChessPieceType
+        const pieceColor = piece === piece.toUpperCase() ? "w" : "b"
+
+        if (pieceColor !== playerColor?.charAt(0)) {
+          toast({
+            title: "Invalid Move",
+            description: "You can only move your own pieces during setup.",
+            variant: "destructive",
+          })
+          return false
         }
-        newSetup[targetSquare] = piece.toUpperCase() // Store piece type (e.g., 'P', 'N', 'B', 'R', 'Q', 'K')
-        setPlayerSetup(newSetup)
-        return false // Prevent default chess.js move
-      }
 
-      if (!isPlayerTurn) {
-        toast({
-          title: "Not your turn",
-          description: "Please wait for your opponent to move.",
-          variant: "destructive",
-        })
-        return false
-      }
+        const currentBoard = game.board()
+        const targetPiece =
+          currentBoard[targetSquare.charCodeAt(1) - "1".charCodeAt(0)][targetSquare.charCodeAt(0) - "a".charCodeAt(0)]
 
-      const gameCopy = new Chess(game.fen())
-      let move = null
-      try {
-        move = gameCopy.move({
+        if (targetPiece) {
+          // If target square has a piece, remove it first
+          const removedValue = pieceValues[targetPiece.type]
+          if (targetPiece.color === "w") {
+            setWhiteBudget((prev) => prev + removedValue)
+          } else {
+            setBlackBudget((prev) => prev + removedValue)
+          }
+          game.remove(targetSquare)
+        }
+
+        const pieceValue = pieceValues[pieceType]
+        let newBudget = playerColor === "white" ? whiteBudget : blackBudget
+
+        if (sourceSquare === "spare") {
+          // Placing a new piece from spare
+          if (newBudget < pieceValue) {
+            toast({
+              title: "Invalid Placement",
+              description: "Not enough budget for this piece.",
+              variant: "destructive",
+            })
+            return false
+          }
+          newBudget -= pieceValue
+          game.put({ type: pieceType, color: pieceColor }, targetSquare)
+        } else {
+          // Moving an existing piece on the board
+          game.move({ from: sourceSquare, to: targetSquare, piece: piece })
+        }
+
+        if (playerColor === "white") {
+          setWhiteBudget(newBudget)
+        } else {
+          setBlackBudget(newBudget)
+        }
+
+        setBoardFen(game.fen())
+        // Update session in DB
+        await updateGameSession(gameId, { board_state: game.board(), white_budget: newBudget, black_budget: newBudget })
+        return true
+      } else {
+        // Handle normal chess moves
+        if (playerColor?.charAt(0) !== game.turn()) {
+          toast({ title: "Invalid Move", description: "It's not your turn.", variant: "destructive" })
+          return false
+        }
+
+        const move = game.move({
           from: sourceSquare,
           to: targetSquare,
-          promotion: piece[1]?.toLowerCase() ?? "q", // always promote to a queen for simplicity
+          promotion: "q", // Always promote to queen for simplicity
         })
-      } catch (e) {
-        console.error("Invalid move:", e)
+
+        if (move === null) {
+          toast({ title: "Invalid Move", description: "That's not a valid chess move.", variant: "destructive" })
+          return false
+        }
+
+        setBoardFen(game.fen())
+        const newMoveHistory = [...session.move_history, game.pgn()]
+        const newTurn = game.turn() === "w" ? "white" : "black"
+
+        // Reset timer for the next player
+        const updates: Partial<GameSession> = {
+          board_state: game.board(),
+          move_history: newMoveHistory,
+          current_turn: newTurn,
+        }
+
+        if (session.move_time_limit > 0) {
+          if (session.current_turn === "white") {
+            updates.time_remaining_white = session.move_time_limit
+          } else {
+            updates.time_remaining_black = session.move_time_limit
+          }
+        }
+
+        await updateGameSession(gameId, updates)
+
+        if (game.isGameOver()) {
+          let outcome = "Game Over"
+          if (game.isCheckmate()) {
+            outcome = `${game.turn() === "w" ? "Black" : "White"} wins by checkmate!`
+          } else if (game.isDraw()) {
+            outcome = "Game is a draw."
+          }
+          toast({ title: "Game Over", description: outcome })
+          await updateGameSession(gameId, { status: "completed" })
+          setTimerActive(false)
+        }
+        return true
       }
-
-      if (move === null) return false
-
-      setGame(gameCopy)
-      // Update board state in DB
-      updateGameSession(gameSession.id, {
-        board_state: gameCopy.fen(),
-        current_turn: gameCopy.turn(),
-        last_move_at: new Date().toISOString(),
-      })
-      return true
     },
-    [game, gameSession.id, isPlayerTurn, isSetupMode, playerSetup],
+    [game, isSetupMode, playerColor, session, gameId],
   )
 
-  const handleSetupSubmit = async () => {
-    setIsSubmittingSetup(true)
-    const setupData = JSON.stringify(playerSetup)
-    const updates: Partial<GameSession> = {}
-
-    if (isPlayer1) {
-      updates.player1_setup = setupData
-    } else if (isPlayer2) {
-      updates.player2_setup = setupData
+  const handleSetupComplete = async () => {
+    if (playerColor === "white") {
+      await updateGameSession(gameId, { white_setup_complete: true })
+      setWhiteSetupComplete(true)
+    } else if (playerColor === "black") {
+      await updateGameSession(gameId, { black_setup_complete: true })
+      setBlackSetupComplete(true)
     }
-
-    const { data, error } = await updateGameSession(gameSession.id, updates)
-
-    if (error) {
-      console.error("Error submitting setup:", error)
-      toast({
-        title: "Error",
-        description: "Failed to submit setup.",
-        variant: "destructive",
-      })
-    } else if (data) {
-      setGameSession(data)
-      toast({
-        title: "Setup Submitted!",
-        description: "Waiting for opponent to submit their setup.",
-      })
-      setIsSetupMode(false) // Exit setup mode after submission
-    }
-    setIsSubmittingSetup(false)
+    toast({ title: "Setup Complete", description: "Waiting for opponent to finish setup." })
+    setSetupDialogOpen(false)
   }
 
-  // Function to calculate piece value (simplified)
-  const calculatePieceValue = (pieceType: string) => {
-    switch (pieceType.toUpperCase()) {
-      case "P":
-        return 100
-      case "N":
-        return 300
-      case "B":
-        return 300
-      case "R":
-        return 500
-      case "Q":
-        return 900
-      case "K":
-        return 0 // King value is special, not part of budget
-      default:
-        return 0
+  useEffect(() => {
+    if (session.white_setup_complete && session.black_setup_complete && session.status === "waiting") {
+      updateGameSession(gameId, { status: "in_progress" })
+      toast({ title: "Setup Complete", description: "Both players have completed setup. Game starting!" })
+      setIsSetupMode(false)
+      setSetupDialogOpen(false)
+      setTimerActive(true)
     }
+  }, [session.white_setup_complete, session.black_setup_complete, session.status, gameId])
+
+  const renderPiece = useCallback((piece: ChessPiece) => {
+    // Custom piece rendering if needed, otherwise default
+    return undefined // Use default rendering
+  }, [])
+
+  const formatTime = (seconds: number) => {
+    const minutes = Math.floor(seconds / 60)
+    const remainingSeconds = seconds % 60
+    return `${minutes.toString().padStart(2, "0")}:${remainingSeconds.toString().padStart(2, "0")}`
   }
 
-  const calculateCurrentSetupCost = () => {
-    let cost = 0
-    for (const square in playerSetup) {
-      cost += calculatePieceValue(playerSetup[square])
-    }
-    return cost
-  }
-
-  const currentSetupCost = calculateCurrentSetupCost()
-
-  if (!playerColor) {
+  const isMyTurn = useMemo(() => {
+    if (isSetupMode) return true // During setup, it's always "your turn" to place pieces
     return (
-      <div className="flex min-h-screen items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin" />
-        <span className="ml-2">Waiting for opponent to join...</span>
-      </div>
+      (playerColor === "white" && session.current_turn === "white") ||
+      (playerColor === "black" && session.current_turn === "black")
     )
-  }
+  }, [isSetupMode, playerColor, session.current_turn])
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-gray-100 p-4 dark:bg-gray-900">
+    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100 dark:bg-gray-900 p-4">
       <Card className="w-full max-w-4xl">
-        <CardHeader>
-          <CardTitle className="text-3xl font-bold">{gameSession.game_name}</CardTitle>
-          <p className="text-sm text-gray-500 dark:text-gray-400">Game ID: {gameSession.id}</p>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            Your Color: {playerColor === "white" ? "White" : "Black"}
-          </p>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            Status: {gameSession.game_status === "waiting" && "Waiting for opponent"}
-            {gameSession.game_status === "setup" && "Setting up board"}
-            {gameSession.game_status === "playing" && (isPlayerTurn ? "Your Turn" : "Opponent's Turn")}
-            {gameSession.game_status === "finished" && "Game Over"}
-          </p>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            Fog of War: {gameSession.fog_of_war_enabled ? "Enabled" : "Disabled"}
-          </p>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            Move Time Limit: {gameSession.move_time_limit > 0 ? `${gameSession.move_time_limit}s` : "No limit"}
-          </p>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+          <CardTitle className="text-2xl font-bold">{session.game_name || "Money Chess Game"}</CardTitle>
+          <div className="text-sm text-gray-500 dark:text-gray-400">Game ID: {gameId.substring(0, 8)}...</div>
         </CardHeader>
-        <CardContent className="flex flex-col items-center gap-6">
-          <div className="w-full max-w-[500px]">
-            <Chessboard
-              position={game.fen()}
-              onPieceDrop={onDrop}
-              boardOrientation={playerColor === "white" ? "white" : "black"}
-              arePiecesDraggable={isPlayerTurn || isSetupMode}
-            />
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Player 1 Info (White) */}
+            <div className="flex flex-col items-center">
+              <h3 className="text-lg font-semibold">White Player</h3>
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                {session.player1_id === currentUserId ? "You" : session.player1_id?.substring(0, 8) || "Waiting..."}
+              </p>
+              {session.move_time_limit > 0 && (
+                <p className={`text-xl font-bold ${session.current_turn === "white" ? "text-green-600" : ""}`}>
+                  {formatTime(timeRemainingWhite)}
+                </p>
+              )}
+              {isSetupMode && playerColor === "white" && (
+                <p className="text-sm text-gray-600 dark:text-gray-400">Budget: ${whiteBudget}</p>
+              )}
+              {session.white_setup_complete && <CheckCircle2 className="h-5 w-5 text-green-500" />}
+            </div>
+
+            {/* Chessboard */}
+            <div className="md:col-span-1 flex justify-center">
+              <Chessboard
+                position={boardFen}
+                onPieceDrop={onDrop}
+                boardOrientation={playerColor === "black" ? "black" : "white"}
+                customDarkSquareStyle={{ backgroundColor: "#779952" }}
+                customLightSquareStyle={{ backgroundColor: "#edeed1" }}
+                customPieces={
+                  isSetupMode
+                    ? {
+                        // Example for custom pieces in setup mode (e.g., from a "spare" pool)
+                        // This would require a more complex piece management system
+                      }
+                    : {}
+                }
+                arePiecesDraggable={isMyTurn}
+              />
+            </div>
+
+            {/* Player 2 Info (Black) */}
+            <div className="flex flex-col items-center">
+              <h3 className="text-lg font-semibold">Black Player</h3>
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                {session.player2_id === currentUserId ? "You" : session.player2_id?.substring(0, 8) || "Waiting..."}
+              </p>
+              {session.move_time_limit > 0 && (
+                <p className={`text-xl font-bold ${session.current_turn === "black" ? "text-green-600" : ""}`}>
+                  {formatTime(timeRemainingBlack)}
+                </p>
+              )}
+              {isSetupMode && playerColor === "black" && (
+                <p className="text-sm text-gray-600 dark:text-gray-400">Budget: ${blackBudget}</p>
+              )}
+              {session.black_setup_complete && <CheckCircle2 className="h-5 w-5 text-green-500" />}
+            </div>
           </div>
 
-          {isSetupMode && (
-            <Card className="w-full p-4">
-              <CardTitle className="mb-4 text-xl">Board Setup</CardTitle>
-              <div className="space-y-4">
-                <div>
-                  <Label htmlFor="budget">Budget: ${setupBudget - currentSetupCost}</Label>
-                  <Slider
-                    id="budget"
-                    min={0}
-                    max={setupBudget}
-                    step={10}
-                    value={[setupBudget - currentSetupCost]}
-                    disabled
-                  />
-                  <p className="text-sm text-gray-500">Current Cost: ${currentSetupCost}</p>
-                </div>
-                <div className="grid grid-cols-6 gap-2">
-                  {/* Example draggable pieces for setup */}
-                  {["P", "N", "B", "R", "Q", "K"].map((pieceType) => (
-                    <Button
-                      key={pieceType}
-                      variant="outline"
-                      className="flex flex-col items-center justify-center p-2 bg-transparent"
-                    >
-                      <span className="text-2xl">{pieceType}</span>
-                      <span className="text-xs text-gray-500">${calculatePieceValue(pieceType)}</span>
-                    </Button>
-                  ))}
-                </div>
-                <Button onClick={handleSetupSubmit} disabled={isSubmittingSetup || currentSetupCost > setupBudget}>
-                  {isSubmittingSetup && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                  Submit Setup
-                </Button>
-              </div>
-            </Card>
-          )}
-
-          {gameSession.game_status === "setup" && !isSetupMode && !opponentSetupSubmitted && (
-            <p className="text-lg font-semibold text-center">Waiting for opponent to submit their setup...</p>
-          )}
-
-          {gameSession.game_status === "setup" && !isSetupMode && opponentSetupSubmitted && (
-            <p className="text-lg font-semibold text-center">
-              Opponent has submitted setup. Waiting for game to start...
+          <div className="mt-4 text-center">
+            <p className="text-lg font-semibold">
+              {isSetupMode ? "Setup Phase" : `Current Turn: ${session.current_turn === "white" ? "White" : "Black"}`}
             </p>
-          )}
-
-          {gameSession.game_status === "playing" && (
-            <div className="flex gap-4">
-              <Button onClick={() => game.undo()}>Undo Last Move</Button>
-              <Button onClick={() => game.reset()}>Reset Game</Button>
-            </div>
-          )}
+            {game.isGameOver() && <p className="text-xl font-bold text-red-600">GAME OVER!</p>}
+          </div>
         </CardContent>
       </Card>
+
+      {/* Setup Dialog */}
+      <Dialog open={setupDialogOpen} onOpenChange={setSetupDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Piece Setup</DialogTitle>
+            <DialogDescription>
+              Place your pieces on the board. Your budget: ${playerColor === "white" ? whiteBudget : blackBudget}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-3 gap-4 py-4">
+            {Object.entries(pieceValues).map(([type, value]) => (
+              <Button
+                key={type}
+                onClick={() => setSelectedPiece(type as ChessPieceType)}
+                variant={selectedPiece === type ? "default" : "outline"}
+                className="flex flex-col h-auto py-4"
+              >
+                <span className="text-2xl">{playerColor === "white" ? type.toUpperCase() : type}</span>
+                <span>${value}</span>
+              </Button>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={handleSetupComplete}
+              disabled={
+                (playerColor === "white" && whiteSetupComplete) || (playerColor === "black" && blackSetupComplete)
+              }
+            >
+              {playerColor === "white" && whiteSetupComplete
+                ? "White Setup Complete"
+                : playerColor === "black" && blackSetupComplete
+                  ? "Black Setup Complete"
+                  : "Complete Setup"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
