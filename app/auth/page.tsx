@@ -25,8 +25,6 @@ export default function AuthPage() {
     setLoading(true)
     let error = null
 
-    console.log(`Attempting to ${isSignUp ? "sign up" : "log in"} with email: ${email}`)
-
     if (isSignUp) {
       const { error: signUpError } = await supabase.auth.signUp({
         email,
@@ -42,14 +40,12 @@ export default function AuthPage() {
     }
 
     if (error) {
-      console.error("Authentication failed:", error.message)
       toast({
         title: "Authentication Error",
         description: error.message,
         variant: "destructive",
       })
     } else {
-      console.log("Authentication successful!")
       toast({
         title: "Success!",
         description: isSignUp

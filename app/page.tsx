@@ -1,12 +1,14 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
-import { Trash2, Clock, EyeOff } from "lucide-react"
-import Link from "next/link"
+import { Switch } from "@/components/ui/switch"
+import { Label } from "@/components/ui/label"
+import { Slider } from "@/components/ui/slider"
+import { Trash2, Clock, Eye, EyeOff } from "lucide-react"
 
 enum PieceType {
   PAWN = "PAWN",
@@ -311,8 +313,8 @@ export default function MoneyChessGame() {
     }
 
     // Clear selections
-    setSelectedPosition(null)
-    setPossibleMoves({ visibleMoves: [], fogMoves: [] })
+    setSelectedPiece(null)
+    setSelectedBoardPosition(null)
   }
 
   // Delete a saved setup
@@ -813,26 +815,64 @@ export default function MoneyChessGame() {
   // Game Setup Screen
   if (gamePhase === GamePhase.GAME_SETUP) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-amber-50 to-orange-100 p-4">
-        <Card className="w-full max-w-md text-center">
-          <CardHeader>
-            <CardTitle className="text-4xl font-bold text-amber-900">Money Chess</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <p className="text-lg text-gray-700">
-              Welcome to Money Chess, where strategy meets economy! Build your army with a budget and outsmart your
-              opponent.
-            </p>
-            <div className="space-y-4">
-              <Button asChild className="w-full">
-                <Link href="/auth">Login / Sign Up</Link>
-              </Button>
-              <Button asChild variant="outline" className="w-full bg-transparent">
-                <Link href="/matchmaking">Play as Guest (Limited Features)</Link>
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+      <div className="min-h-screen bg-gradient-to-br from-amber-50 to-orange-100 p-4">
+        <div className="max-w-2xl mx-auto">
+          <h1 className="text-4xl font-bold text-center mb-8 text-amber-900">Money Chess</h1>
+
+          <Card className="mb-6">
+            <CardContent className="p-8">
+              <h2 className="text-2xl font-bold mb-6 text-center">Game Setup</h2>
+
+              <div className="space-y-8">
+                {/* Fog of War Setting */}
+                <div className="flex items-center justify-between p-4 border rounded-lg">
+                  <div className="flex items-center gap-3">
+                    {fogOfWarEnabled ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                    <div>
+                      <Label htmlFor="fog-of-war" className="text-lg font-medium">
+                        Fog of War
+                      </Label>
+                      <p className="text-sm text-gray-600">Only see squares adjacent to your pieces</p>
+                    </div>
+                  </div>
+                  <Switch id="fog-of-war" checked={fogOfWarEnabled} onCheckedChange={setFogOfWarEnabled} />
+                </div>
+
+                {/* Move Timer Setting */}
+                <div className="p-4 border rounded-lg">
+                  <div className="flex items-center gap-3 mb-4">
+                    <Clock className="h-5 w-5" />
+                    <div>
+                      <Label className="text-lg font-medium">Move Time Limit</Label>
+                      <p className="text-sm text-gray-600">Maximum time per move: {formatTime(moveTimeLimit)}</p>
+                    </div>
+                  </div>
+                  <div className="space-y-4">
+                    <Slider
+                      value={[moveTimeLimit]}
+                      onValueChange={(value) => setMoveTimeLimit(value[0])}
+                      max={300}
+                      min={30}
+                      step={30}
+                      className="w-full"
+                    />
+                    <div className="flex justify-between text-xs text-gray-500">
+                      <span>30s</span>
+                      <span>2:30</span>
+                      <span>5:00</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-8 text-center">
+                <Button onClick={startGameSetup} size="lg" className="px-8">
+                  Start Game
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     )
   }
